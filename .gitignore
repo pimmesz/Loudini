@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+helper/loudini-helper
+menubar/Loudini.app/
+menubar/AppIcon.iconset/

@@ -1,0 +1,4 @@
+node_modules/
+gg.pim.loudini.sdPlugin/bin/
+*.log
+.DS_Store

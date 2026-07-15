@@ -1,0 +1,594 @@
+// LoudiniApp.swift — the Loudini menu-bar app: grabs the hardware volume keys
+// (VolumeKeyTap), shows the live level in the menu bar + a dropdown slider, and
+// pops a HUD on every level change (HUDWindow). All state comes from the
+// daemon's status.json; all changes go through the shared atomic control.json
+// writers in helper/ControlFile.swift — the exact code the CLI uses.
+//
+// Build: menubar/build-app.sh (bundles the daemon into Loudini.app).
+
+import AppKit
+import ServiceManagement
+
+@main
+enum LoudiniMain {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)  // menu-bar only, no Dock icon
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        // NSApplication does not retain its delegate; keep it alive explicitly
+        // (ARC may release a local after its last use, even mid-run()).
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private static let step = 6  // % per key press — matches the CLI and Stream Deck
+
+    private var statusItem: NSStatusItem!
+    private var slider: NSSlider!
+    private var headerLevelLabel: NSTextField!
+    private var muteItem: NSMenuItem!
+    private var deviceItem: NSMenuItem!
+    private var conflictItem: NSMenuItem!
+    private var grabKeysItem: NSMenuItem!
+    private var fixPermissionItem: NSMenuItem!
+    private var accessibilityItem: NSMenuItem!
+    private var loginItem: NSMenuItem!
+
+    private var keyTap: VolumeKeyTap?
+    private var statusWatcher: StatusWatcher!
+    private var hud: HUDWindow!
+    private var axRetryTimer: Timer?
+
+    private var daemon: Process?
+    private var daemonRetryTimer: Timer?
+    private var lastStatusRunning = false
+    private var lastPipelineOK = false
+    private var lastShownGain = 100
+    private var lastShownMuted = false
+    private var isQuitting = false
+    private var wantsKeyGrab = true
+    /// Last (gain, muted) seen running — HUD fires only when the level moves.
+    private var lastLevel: (gain: Int, muted: Bool)?
+
+    /// Control writes happen off the main thread (tap callback + UI must not block on IO).
+    private let writeQueue = DispatchQueue(label: "gg.pim.loudini.menubar.write", qos: .userInitiated)
+
+    /// The bundled logo, sized for the status bar (nil when running unbundled).
+    private static let menuBarLogo: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.size = NSSize(width: 18, height: 18)
+        return image
+    }()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.menu = buildMenu()
+        renderStatusItem()
+
+        hud = HUDWindow()
+        ensureDaemon()
+        // Recover a missing daemon while status shows it down (covers crashes,
+        // spawn races, and pgrep false positives — the daemon's own flock makes
+        // a redundant spawn harmless).
+        daemonRetryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self, !self.isQuitting, !self.lastStatusRunning else { return }
+            self.ensureDaemon()
+        }
+
+        statusWatcher = StatusWatcher { [weak self] status in self?.statusChanged(status) }
+        statusWatcher.start()
+
+        setupKeyTap(promptIfNeeded: true)
+        startKeyTapWatchdog()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        isQuitting = true
+        keyTap?.stop()
+        statusWatcher.stop()
+        axRetryTimer?.invalidate()
+        daemonRetryTimer?.invalidate()
+        writeQueue.sync {}  // drain pending control.json writes before we go
+        if let d = daemon, d.isRunning { d.terminate() }  // daemon fails open on SIGTERM
+    }
+
+    // MARK: menu
+
+    private func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+
+        // Header: logo + name left, live level right.
+        let headerItem = NSMenuItem()
+        headerItem.isEnabled = false
+        let header = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 34))
+        let logoView = NSImageView(frame: NSRect(x: 14, y: 6, width: 22, height: 22))
+        if let logo = Self.menuBarLogo?.copy() as? NSImage {
+            logo.size = NSSize(width: 22, height: 22)
+            logoView.image = logo
+        }
+        let nameLabel = NSTextField(labelWithString: "Loudini")
+        nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        nameLabel.frame = NSRect(x: 42, y: 9, width: 130, height: 17)
+        headerLevelLabel = NSTextField(labelWithString: "100%")
+        headerLevelLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        headerLevelLabel.textColor = .secondaryLabelColor
+        headerLevelLabel.alignment = .right
+        headerLevelLabel.frame = NSRect(x: 196, y: 9, width: 70, height: 17)
+        header.addSubview(logoView)
+        header.addSubview(nameLabel)
+        header.addSubview(headerLevelLabel)
+        headerItem.view = header
+        menu.addItem(headerItem)
+
+        menu.addItem(.separator())
+
+        // Volume row, Sound-menu style: quiet icon — slider — loud icon.
+        let sliderItem = NSMenuItem()
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 30))
+        let quiet = NSImageView(frame: NSRect(x: 14, y: 8, width: 14, height: 14))
+        quiet.image = NSImage(systemSymbolName: "speaker.fill", accessibilityDescription: nil)
+        quiet.contentTintColor = .secondaryLabelColor
+        let loud = NSImageView(frame: NSRect(x: 250, y: 8, width: 17, height: 14))
+        loud.image = NSImage(systemSymbolName: "speaker.wave.3.fill", accessibilityDescription: nil)
+        loud.contentTintColor = .secondaryLabelColor
+        slider = NSSlider(value: 100, minValue: 0, maxValue: 100,
+                          target: self, action: #selector(sliderMoved(_:)))
+        slider.isContinuous = true
+        slider.frame = NSRect(x: 34, y: 3, width: 210, height: 24)
+        row.addSubview(quiet)
+        row.addSubview(slider)
+        row.addSubview(loud)
+        sliderItem.view = row
+        menu.addItem(sliderItem)
+
+        // No key equivalent: ⌘M reads as the system Minimize shortcut, and the
+        // hardware mute key already covers this.
+        muteItem = NSMenuItem(title: "Mute", action: #selector(muteClicked), keyEquivalent: "")
+        muteItem.target = self
+        muteItem.image = NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: nil)
+        menu.addItem(muteItem)
+
+        deviceItem = NSMenuItem(title: "Daemon not running",
+                                action: #selector(openAudioCaptureSettings), keyEquivalent: "")
+        deviceItem.target = self
+        deviceItem.isEnabled = false  // becomes clickable only in the "fix permission" state
+        deviceItem.image = NSImage(systemSymbolName: "hifispeaker.fill", accessibilityDescription: nil)
+        menu.addItem(deviceItem)
+
+        // Shown only when a known media-key grabber is running (menuWillOpen).
+        conflictItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        conflictItem.isEnabled = false
+        conflictItem.isHidden = true
+        conflictItem.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                                     accessibilityDescription: "warning")
+        menu.addItem(conflictItem)
+
+        menu.addItem(.separator())
+
+        grabKeysItem = NSMenuItem(title: "Grab Volume Keys",
+                                  action: #selector(toggleGrabKeys), keyEquivalent: "")
+        grabKeysItem.target = self
+        grabKeysItem.state = .on
+        grabKeysItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
+        menu.addItem(grabKeysItem)
+
+        // The rebuild-invalidated-grant trap: Settings shows the toggle ON while
+        // macOS denies the new binary. One click wipes our TCC entry and
+        // re-prompts fresh.
+        fixPermissionItem = NSMenuItem(title: "Fix Volume-Key Permission…",
+                                       action: #selector(fixAccessibilityClicked), keyEquivalent: "")
+        fixPermissionItem.target = self
+        fixPermissionItem.isHidden = true
+        fixPermissionItem.image = NSImage(systemSymbolName: "wrench.and.screwdriver.fill",
+                                          accessibilityDescription: nil)
+        menu.addItem(fixPermissionItem)
+
+        accessibilityItem = NSMenuItem(title: "Open Accessibility Settings…",
+                                       action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        accessibilityItem.target = self
+        accessibilityItem.isHidden = true
+        accessibilityItem.image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)
+        menu.addItem(accessibilityItem)
+
+        menu.addItem(.separator())
+
+        loginItem = NSMenuItem(title: "Start at Login",
+                               action: #selector(toggleLoginItem), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.image = NSImage(systemSymbolName: "arrow.right.circle", accessibilityDescription: nil)
+        menu.addItem(loginItem)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit Loudini", action: #selector(quitClicked), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        return menu
+    }
+
+    /// Other apps known to tap the media keys; whoever installed their tap
+    /// last sees the keys first, so these can starve Loudini (and vice versa).
+    private func mediaKeyRival() -> String? {
+        let rivals: Set<String> = ["MonitorControl", "Background Music", "BeardedSpice"]
+        return NSWorkspace.shared.runningApplications
+            .compactMap { $0.localizedName }
+            .first { rivals.contains($0) }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshPermissionUI()
+        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        if let rival = mediaKeyRival() {
+            conflictItem.title = "\(rival) may intercept the volume keys"
+            conflictItem.toolTip = "If the keys don't reach Loudini, disable volume-key handling in "
+                + "\(rival), or launch Loudini after it."
+            conflictItem.isHidden = false
+        } else {
+            conflictItem.isHidden = true
+        }
+    }
+
+    // MARK: status.json -> UI (the visual layer; reacts to changes from ANY frontend)
+
+    private func statusChanged(_ status: Status?) {
+        guard !isQuitting else { return }
+        let running = status?.running ?? false
+        lastStatusRunning = running
+        // While the daemon is down, show what control.json will apply when it's back.
+        let control = ControlOps.current()
+        let gain = running ? status!.gain : control.gain
+        let muted = running ? status!.muted : control.muted
+
+        lastPipelineOK = status?.pipeline ?? false
+        lastShownGain = gain
+        lastShownMuted = muted
+        renderStatusItem()
+        // Don't fight the user's hand: skip the echo while the knob is being dragged.
+        if !(slider.cell?.isHighlighted ?? false) {
+            slider.doubleValue = Double(gain)
+        }
+        headerLevelLabel.stringValue = !running ? "off" : muted ? "Muted" : "\(gain)%"
+        muteItem.state = muted ? .on : .off
+        if !running {
+            deviceItem.title = "Daemon not running"
+            deviceItem.isEnabled = false
+            deviceItem.toolTip = nil
+        } else if !lastPipelineOK {
+            if status!.reason == "no-device" {
+                deviceItem.title = "No output device"
+                deviceItem.isEnabled = false
+                deviceItem.toolTip = nil
+            } else {
+                // Permission is the most likely cause, but the daemon can't
+                // distinguish it from other capture failures — say so honestly
+                // and still make the row the (probable) fix.
+                deviceItem.title = "Audio capture not working — click to fix"
+                deviceItem.isEnabled = true
+                deviceItem.toolTip = "Most likely the System Audio Recording permission."
+                    + (status!.reason.isEmpty ? "" : " Daemon reports: \(status!.reason)")
+            }
+        } else {
+            deviceItem.title = "Output: \(status!.device.isEmpty ? "default device" : status!.device)"
+            deviceItem.isEnabled = false
+            deviceItem.toolTip = nil
+        }
+
+        guard running else {
+            lastLevel = nil
+            return
+        }
+        // HUD only when the level actually moved AND audio is actually being
+        // rendered — never fake feedback for a dead pipeline.
+        if lastPipelineOK, let last = lastLevel, last != (gain, muted) {
+            hud.show(gain: gain, muted: muted)
+        }
+        lastLevel = (gain, muted)
+    }
+
+    /// Renders icon, level, distress badge (⚠︎ when something needs the user)
+    /// and tooltip from the stored state. Called from statusChanged and the
+    /// key-tap watchdog so problems surface without opening the menu.
+    private func renderStatusItem() {
+        guard let button = statusItem.button else { return }
+        let healthy = lastStatusRunning && lastPipelineOK
+        let keysDead = wantsKeyGrab && keyTap?.isRunning != true
+        let badge = keysDead || (lastStatusRunning && !lastPipelineOK) ? " ⚠︎" : ""
+        if let logo = Self.menuBarLogo {
+            // Brand logo + live level, so the menu bar still shows how loud
+            // Loudini is at a glance.
+            button.image = logo
+            button.imagePosition = .imageLeft
+            button.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+            button.title = (lastShownMuted ? " 🔇" : " \(lastShownGain)%") + badge
+        } else {
+            let name = lastShownMuted ? "speaker.slash.fill" : speakerSymbolName(for: lastShownGain)
+            let image = NSImage(systemSymbolName: name, accessibilityDescription: "Loudini volume")
+            image?.isTemplate = true
+            button.image = image
+            button.title = badge
+        }
+        button.appearsDisabled = !healthy
+        if !lastStatusRunning {
+            button.toolTip = "Loudini — daemon not running"
+        } else if !lastPipelineOK {
+            button.toolTip = "Loudini — no audio control: grant System Audio Recording (open the menu)"
+        } else if keysDead {
+            button.toolTip = "Loudini — volume keys need Accessibility (open the menu)"
+        } else {
+            button.toolTip = "Loudini — \(lastShownMuted ? "muted" : "\(lastShownGain)%")"
+        }
+    }
+
+    // MARK: user actions -> control.json (shared atomic writers)
+
+    private func writeControlChange(_ op: @escaping () throws -> Control) {
+        writeQueue.async {
+            do { _ = try op() }
+            catch { NSLog("Loudini: control.json write failed: %@", error.localizedDescription) }
+        }
+    }
+
+    @objc private func sliderMoved(_ sender: NSSlider) {
+        let gain = Int(sender.doubleValue.rounded())
+        headerLevelLabel.stringValue = "\(gain)%"  // instant feedback; status echo follows
+        writeControlChange { try ControlOps.set(gain: gain) }
+    }
+
+    @objc private func muteClicked() {
+        writeControlChange { try ControlOps.toggleMute() }
+    }
+
+    private func handleVolumeKey(_ key: VolumeKeyTap.Key) {
+        writeControlChange {
+            switch key {
+            case .up: return try ControlOps.nudge(Self.step)
+            case .down: return try ControlOps.nudge(-Self.step)
+            case .mute: return try ControlOps.toggleMute()
+            }
+        }
+    }
+
+    // MARK: volume-key tap + Accessibility permission
+
+    private func setupKeyTap(promptIfNeeded: Bool) {
+        guard wantsKeyGrab, keyTap?.isRunning != true else { return }
+
+        let trusted: Bool
+        if promptIfNeeded {
+            let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            trusted = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+        } else {
+            trusted = AXIsProcessTrusted()
+        }
+
+        if trusted {
+            UserDefaults.standard.set(true, forKey: "wasEverAXTrusted")
+            let tap = VolumeKeyTap { [weak self] key in self?.handleVolumeKey(key) }
+            // Only own the keys while audio is actually under our control;
+            // otherwise pass them to macOS so its native (crossed-out) HUD
+            // gives an honest "this does nothing" signal. Both closures run
+            // on the main run loop — no race.
+            tap.shouldConsume = { [weak self] in
+                guard let self else { return false }
+                return self.lastStatusRunning && self.lastPipelineOK
+            }
+            if tap.start() {
+                keyTap = tap
+            } else {
+                NSLog("Loudini: event tap creation failed despite Accessibility trust — watchdog will retry")
+            }
+        }
+        // If not trusted: degrade gracefully (menu + slider keep working);
+        // the watchdog below picks the keys up the moment trust appears.
+        refreshPermissionUI()
+    }
+
+    /// 3 s watchdog: heals a revoked grant, a macOS-disabled tap, or a failed
+    /// creation, and keeps the permission UI + distress badge current.
+    private func startKeyTapWatchdog() {
+        axRetryTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            guard let self, !self.isQuitting else { return }
+            let trusted = AXIsProcessTrusted()
+            if trusted { UserDefaults.standard.set(true, forKey: "wasEverAXTrusted") }
+            if self.wantsKeyGrab, let tap = self.keyTap, !trusted || !tap.isEnabled {
+                NSLog("Loudini: key tap lost (trusted=%d, enabled=%d) — rebuilding",
+                      trusted ? 1 : 0, tap.isEnabled ? 1 : 0)
+                tap.stop()
+                self.keyTap = nil
+            }
+            if self.wantsKeyGrab, self.keyTap == nil, trusted {
+                self.setupKeyTap(promptIfNeeded: false)
+            }
+            self.refreshPermissionUI()
+            self.renderStatusItem()
+        }
+    }
+
+    private func refreshPermissionUI() {
+        let trusted = AXIsProcessTrusted()
+        accessibilityItem.isHidden = trusted
+        fixPermissionItem.isHidden = trusted
+        // Stale grant (we were trusted before a rebuild changed our ad-hoc
+        // identity) reads differently from a never-granted install.
+        fixPermissionItem.title = UserDefaults.standard.bool(forKey: "wasEverAXTrusted")
+            ? "Repair Volume-Key Permission (app was rebuilt)…"
+            : "Fix Volume-Key Permission…"
+        grabKeysItem.title = trusted || !wantsKeyGrab
+            ? "Grab Volume Keys"
+            : "Grab Volume Keys (needs Accessibility)"
+        grabKeysItem.state = wantsKeyGrab ? .on : .off
+    }
+
+    @objc private func toggleGrabKeys() {
+        wantsKeyGrab.toggle()
+        if wantsKeyGrab {
+            setupKeyTap(promptIfNeeded: true)
+        } else {
+            keyTap?.stop()
+            keyTap = nil
+            refreshPermissionUI()
+        }
+        renderStatusItem()
+    }
+
+    @objc private func openAccessibilitySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func openAudioCaptureSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Repairs the "Settings shows the toggle ON but macOS denies us" state
+    /// that ad-hoc re-signing causes: wipe our own TCC Accessibility entry,
+    /// then ask again so a fresh prompt appears.
+    @objc private func fixAccessibilityClicked() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            p.arguments = ["reset", "Accessibility",
+                           Bundle.main.bundleIdentifier ?? "gg.pim.loudini.menubar"]
+            p.standardOutput = Pipe()
+            p.standardError = Pipe()
+            try? p.run()
+            p.waitUntilExit()
+            DispatchQueue.main.async {
+                guard let self, !self.isQuitting else { return }
+                self.keyTap?.stop()
+                self.keyTap = nil
+                self.setupKeyTap(promptIfNeeded: true)
+            }
+        }
+    }
+
+    @objc private func toggleLoginItem() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            NSLog("Loudini: could not change login item: %@", error.localizedDescription)
+        }
+        loginItem.state = service.status == .enabled ? .on : .off
+    }
+
+    @objc private func quitClicked() {
+        NSApp.terminate(nil)
+    }
+
+    // MARK: daemon ownership
+
+    private func ensureDaemon() {
+        if let d = daemon, d.isRunning { return }
+        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/gg.pim.loudini.plist"
+        let hasAgent = FileManager.default.fileExists(atPath: plistPath)
+        // pgrep/launchctl block on waitUntilExit — keep them off the main
+        // thread (the event-tap callback lives there). The daemon's flock
+        // makes any race here harmless: a redundant instance exits by itself.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            if Self.isDaemonProcessAlive() { return }
+            if hasAgent {
+                // The user installed the LaunchAgent — revive it rather than
+                // spawning our own: kickstart restarts a loaded job, bootstrap
+                // covers "plist present but never loaded".
+                if Self.runLaunchctl(["kickstart", "gui/\(getuid())/gg.pim.loudini"]) != 0 {
+                    _ = Self.runLaunchctl(["bootstrap", "gui/\(getuid())", plistPath])
+                }
+                // A plist pointing at a moved/deleted binary makes both calls
+                // useless (or "succeed" into a job that can never run). Probe
+                // once after a grace period and fall back to our bundled
+                // daemon — the flock arbitrates if the agent comes up too.
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+                    guard !Self.isDaemonProcessAlive() else { return }
+                    NSLog("Loudini: LaunchAgent did not produce a daemon — falling back to the bundled one")
+                    DispatchQueue.main.async {
+                        guard let self, !self.isQuitting else { return }
+                        if let d = self.daemon, d.isRunning { return }
+                        self.spawnDaemon()
+                    }
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self, !self.isQuitting else { return }
+                if let d = self.daemon, d.isRunning { return }
+                self.spawnDaemon()
+            }
+        }
+    }
+
+    private static func runLaunchctl(_ args: [String]) -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
+        do { try p.run() } catch { return -1 }
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+
+    /// True when any of OUR loudini-helper processes is up (scoped to this
+    /// user — another account's daemon must not suppress ours). A CLI
+    /// invocation can match too — that false positive only delays the spawn
+    /// by one 5 s retry tick.
+    private static func isDaemonProcessAlive() -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-U", "\(getuid())", "-x", "loudini-helper"]
+        p.standardOutput = Pipe()
+        p.standardError = Pipe()
+        do { try p.run() } catch { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }
+
+    private func spawnDaemon() {
+        // The daemon ships inside the bundle, next to our own executable.
+        let url = Bundle.main.executableURL!.deletingLastPathComponent()
+            .appendingPathComponent("loudini-helper")
+        guard FileManager.default.isExecutableFile(atPath: url.path) else {
+            NSLog("Loudini: bundled daemon missing at %@ — run menubar/build-app.sh", url.path)
+            return
+        }
+        let p = Process()
+        p.executableURL = url
+        if let log = daemonLogHandle() {
+            p.standardOutput = log
+            p.standardError = log
+        }
+        // No immediate respawn on exit: the 5 s daemonRetryTimer recovers it,
+        // which doubles as backoff if the daemon dies instantly every time.
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async { self?.daemon = nil }
+        }
+        do {
+            try p.run()
+            daemon = p
+            NSLog("Loudini: spawned daemon pid %d", p.processIdentifier)
+        } catch {
+            NSLog("Loudini: cannot start daemon: %@", error.localizedDescription)
+        }
+    }
+
+    private func daemonLogHandle() -> FileHandle? {
+        let url = configDir.appendingPathComponent("daemon.log")
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
+        handle.seekToEndOfFile()
+        return handle
+    }
+}

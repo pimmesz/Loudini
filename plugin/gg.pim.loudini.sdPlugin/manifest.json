@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Name": "Loudini",
+  "Version": "0.1.0.0",
+  "Author": "pim",
+  "Description": "A software output volume for audio interfaces that have no OS volume of their own (e.g. Focusrite Scarlett). Uses a driverless macOS 14.4+ audio tap — no Background Music, no driver, no admin.",
+  "Category": "Loudini",
+  "CodePath": "bin/plugin.js",
+  "Icon": "imgs/plugin/marketplace",
+  "SDKVersion": 2,
+  "Nodejs": { "Version": "20", "Debug": "enabled" },
+  "Software": { "MinimumVersion": "6.5" },
+  "OS": [{ "Platform": "mac", "MinimumVersion": "14.4" }],
+  "UUID": "gg.pim.loudini",
+  "Actions": [
+    {
+      "UUID": "gg.pim.loudini.up",
+      "Name": "Volume Up",
+      "Icon": "imgs/actions/vol-up",
+      "Tooltip": "Raise the software output volume for every app.",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/actions/vol-up" }]
+    },
+    {
+      "UUID": "gg.pim.loudini.down",
+      "Name": "Volume Down",
+      "Icon": "imgs/actions/vol-down",
+      "Tooltip": "Lower the software output volume for every app.",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/actions/vol-down" }]
+    },
+    {
+      "UUID": "gg.pim.loudini.mute",
+      "Name": "Mute",
+      "Icon": "imgs/actions/mute",
+      "Tooltip": "Toggle mute for the software output volume.",
+      "Controllers": ["Keypad"],
+      "States": [{ "Image": "imgs/actions/mute" }]
+    }
+  ]
+}

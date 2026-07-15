@@ -1,0 +1,22 @@
+{
+  "name": "loudini-streamdeck",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.12.1",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@elgato/streamdeck": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}
