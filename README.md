@@ -16,44 +16,55 @@ instantly restores the normal direct audio path. A crash can never leave you mut
 ## Quick start (menu-bar app — the easiest path)
 
 ```sh
-# 1. Build the engine (one binary: daemon + CLI)
-cd helper
-swiftc -O -parse-as-library -o loudini-helper \
-  loudini-helper.swift ControlFile.swift \
-  -framework CoreAudio -framework AudioToolbox -framework Foundation
-
-# 2. Build and open the menu-bar app (bundles the daemon inside)
-cd ../menubar && ./build-app.sh && open Loudini.app
+menubar/build-app.sh && open menubar/Loudini.app
 ```
+
+One command: it compiles the engine (`helper/loudini-helper`, the daemon + CLI binary), builds the
+app, and bundles the daemon inside.
 
 First run, in order:
 
 1. If you downloaded this instead of building it: right-click → Open once (Gatekeeper), or
-   `xattr -d com.apple.quarantine Loudini.app`.
+   `xattr -dr com.apple.quarantine Loudini.app` (recursive — quarantine sits on every file inside).
 2. Grant **Accessibility** when prompted — this is what lets Loudini own your volume keys.
 3. Grant **System Audio Recording** when the daemon starts — this is the volume engine itself.
    (Loudini captures app audio only to re-render it at your chosen volume; nothing is recorded.)
-4. Verify: `../helper/loudini-helper get` should print `running=true pipeline=true` and your device name
+4. Verify: `helper/loudini-helper get` should print `running=true pipeline=true` and your device name
    — or just look at the menu bar: the Loudini item shows the live level, and a ⚠︎ badge if anything
    still needs attention (the dropdown then contains the fix).
 
 > **⚠️ After every rebuild, re-grant.** The app is ad-hoc signed, so each rebuild changes its code
 > identity: macOS silently invalidates both grants **while the Settings toggles still show enabled**.
-> Fix: the menu's **Repair Volume-Key Permission…** item, or
+> Fix: the menu's **Repair Volume-Key Permission…** item (Accessibility) and the
+> **Audio capture not working — click to fix** row (System Audio Recording), or
 > `tccutil reset Accessibility gg.pim.loudini.menubar` + relaunch.
 
 ## Pick your frontend
 
 | Frontend | Needs | What you get |
 |---|---|---|
-| **Menu-bar app** (`menubar/`) | Accessibility | Volume keys just work; live level in the menu bar (+ ⚠︎ when broken); slider, mute, HUD; Start at Login; self-repair actions |
-| **CLI** (`scripts/install-cli.sh`) | nothing | `loudini up/down/mute/set/get/doctor` from any terminal or hotkey tool |
+| **Menu-bar app** (`menubar/`) | Accessibility + System Audio Recording | Volume keys just work; live level in the menu bar (+ ⚠︎ when broken); volume + brightness sliders, mute, HUD; Start at Login; self-repair actions |
+| **CLI** (`scripts/install-cli.sh`) | a running daemon (app or LaunchAgent) | `loudini up/down/mute/set/get/doctor` from any terminal or hotkey tool |
 | **Stream Deck** (`plugin/`) | Stream Deck app | Up/Down/Mute keys, faces show the live level (`42%` / 🔇 / ⚠︎) |
-| **Karabiner / BTT / skhd** | that tool | Bind any key to the CLI — recipe in the appendix |
+| **Karabiner / BTT / skhd** | that tool + the CLI | Bind any key to the CLI — recipe in the appendix |
+
+Every frontend needs the engine built once — `menubar/build-app.sh` does that (or run the `swiftc`
+line inside it if you only want the binary).
 
 Run **exactly one daemon** — it enforces this itself with a lock file, so worst case a second daemon
 exits immediately. The menu-bar app prefers your LaunchAgent when one is installed (and revives it if
 it died); otherwise it runs its own bundled daemon.
+
+### External-monitor brightness (menu-bar app, Apple Silicon)
+
+With an external DDC-capable monitor attached, the menu-bar app also controls its **brightness**
+(DDC/CI, the same mechanism MonitorControl uses — no extra permission needed):
+
+- The hardware **brightness keys** drive it — but only when no built-in display is active, so a
+  MacBook with the lid open keeps native control of its own panel. Toggle with
+  **Grab Brightness Keys** in the menu.
+- A second slider (sun icons) appears in the dropdown, and brightness changes get their own HUD.
+- All external displays move together for now. Intel Macs: the feature simply stays hidden.
 
 ### Keep the daemon alive without the app (LaunchAgent)
 
@@ -80,7 +91,8 @@ loudini doctor        diagnose the whole setup (daemon, permissions, conflicts) 
 ```
 
 The subcommands only write `control.json` and exit instantly — the running daemon applies the change
-within 100 ms. Debug metering: `LOUDINI_METER=1 loudini-helper` logs per-second in/out RMS.
+within 100 ms. Debug metering: `LOUDINI_METER=1 loudini` runs the daemon with per-second in/out RMS
+logging (stop the normal daemon first — the single-instance lock makes a second one exit).
 
 ## Stream Deck plugin
 
@@ -118,7 +130,7 @@ and prints the exact fix for anything broken.
 
 - **Volume keys do nothing, but Accessibility shows Loudini enabled.** Stale grant after a rebuild —
   see the warning in Quick start. Menu → **Repair Volume-Key Permission…** fixes it in one click.
-- **Menu says "No audio permission — click to fix" / key faces show ⚠︎.** The daemon can't create
+- **Menu says "Audio capture not working — click to fix" / key faces show ⚠︎.** The daemon can't create
   its tap — grant System Audio Recording to whichever app runs the daemon. Audio keeps playing
   normally until then (fail-open), and the volume keys deliberately fall through to macOS so you see
   the native crossed-out HUD instead of fake feedback.
@@ -127,13 +139,17 @@ and prints the exact fix for anything broken.
   after it.
 - **Menu-bar icon is dimmed.** Loudini isn't controlling audio right now — open the menu; the broken
   row names the problem and is usually clickable as the fix.
+- **Brightness keys don't respond.** They're only grabbed when an external DDC display is present
+  AND no built-in display is active (lid closed / desktop Mac); check the **Grab Brightness Keys**
+  toggle. The slider in the menu always works when the row is visible.
 
 ## Gotchas
 
 - **Background Music**: must be quit/uninstalled — see the warning at the top.
 - **System Audio Recording permission** is granted per responsible process: under the LaunchAgent
   that's the daemon itself; when the Stream Deck app or the menu-bar app spawns the daemon, the
-  prompt names *that* app instead. Grant it once per host.
+  prompt names *that* app instead. Grant it once per app identity (so again after rebuilds — see the
+  Quick start warning).
 - The macOS volume HUD stays the crossed-out one unless you use the menu-bar app (which replaces it
   with its own HUD) — Karabiner/BTT bindings change the volume without any HUD.
 
