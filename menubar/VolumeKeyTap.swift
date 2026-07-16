@@ -10,12 +10,14 @@ import AppKit
 // From <IOKit/hidsystem/ev_keymap.h> — not exposed to Swift.
 private let NX_KEYTYPE_SOUND_UP: Int64 = 0
 private let NX_KEYTYPE_SOUND_DOWN: Int64 = 1
+private let NX_KEYTYPE_BRIGHTNESS_UP: Int64 = 2
+private let NX_KEYTYPE_BRIGHTNESS_DOWN: Int64 = 3
 private let NX_KEYTYPE_MUTE: Int64 = 7
 private let NX_SYSDEFINED: UInt32 = 14
 private let NX_SUBTYPE_AUX_CONTROL_BUTTONS: Int16 = 8
 
 final class VolumeKeyTap {
-    enum Key { case up, down, mute }
+    enum Key { case up, down, mute, brightnessUp, brightnessDown }
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -25,6 +27,10 @@ final class VolumeKeyTap {
     /// through to macOS untouched — Loudini only owns them while its daemon is
     /// actually controlling audio.
     var shouldConsume: () -> Bool = { true }
+
+    /// Same idea for the brightness keys: only own them when an external DDC
+    /// display exists and macOS isn't managing a built-in panel.
+    var shouldConsumeBrightness: () -> Bool = { false }
 
     /// `handler` is called on the main run loop (where the tap lives); it must
     /// not block — hand real work to another queue.
@@ -95,10 +101,16 @@ final class VolumeKeyTap {
         case NX_KEYTYPE_SOUND_UP: key = .up
         case NX_KEYTYPE_SOUND_DOWN: key = .down
         case NX_KEYTYPE_MUTE: key = .mute
+        case NX_KEYTYPE_BRIGHTNESS_UP: key = .brightnessUp
+        case NX_KEYTYPE_BRIGHTNESS_DOWN: key = .brightnessDown
         default: return Unmanaged.passUnretained(cgEvent)
         }
 
-        guard shouldConsume() else { return Unmanaged.passUnretained(cgEvent) }
+        let isBrightness = key == .brightnessUp || key == .brightnessDown
+        let willConsume = isBrightness ? shouldConsumeBrightness() : shouldConsume()
+        guard willConsume else {
+            return Unmanaged.passUnretained(cgEvent)
+        }
         if isKeyDown { handler(key) }
         return nil  // consume down AND up so macOS never reacts to the key
     }

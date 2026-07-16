@@ -583,6 +583,8 @@ usage: loudini-helper [--device <UID>]   run the gain daemon (default: current o
        loudini-helper set <0-100>        set gain
        loudini-helper get                print current level (status.json if present)
        loudini-helper doctor             diagnose the whole setup, with fixes
+       loudini-helper brightness up|down [step] | set <0-100> | get
+                                         external-monitor brightness over DDC (no permission needed)
 """
 
 func usage() -> Never {
@@ -606,6 +608,8 @@ enum LoudiniHelper {
             runCLI(args)
         case "doctor":
             runDoctor()
+        case "brightness":
+            runBrightness(Array(args.dropFirst()))
         default:
             runDaemon(args)
         }
@@ -652,6 +656,39 @@ enum LoudiniHelper {
                 Data("error: cannot write \(controlURL.path): \(error.localizedDescription)\n".utf8))
             exit(1)
         }
+    }
+
+    // MARK: brightness — external-monitor DDC control (no permission needed).
+
+    private static func runBrightness(_ args: [String]) -> Never {
+        guard DDC.isSupported else {
+            FileHandle.standardError.write(Data("brightness: DDC not available on this Mac\n".utf8))
+            exit(1)
+        }
+        func step(_ rest: [String]) -> Int {
+            guard let s = rest.first else { return 6 }
+            guard let n = Int(s), (0...100).contains(n) else { usage() }
+            return n
+        }
+        let applied: Int?
+        switch args.first {
+        case "up":   applied = DDC.nudge(step(Array(args.dropFirst())))
+        case "down": applied = DDC.nudge(-step(Array(args.dropFirst())))
+        case "set":
+            guard args.count == 2, let n = Int(args[1]) else { usage() }
+            applied = DDC.set(percent: n)
+        case "get":
+            print("brightness=\(DDC.current())")
+            exit(0)
+        default:
+            usage()
+        }
+        guard let applied else {
+            FileHandle.standardError.write(Data("brightness: no external DDC display connected\n".utf8))
+            exit(1)
+        }
+        print("brightness=\(applied)")
+        exit(0)
     }
 
     // MARK: doctor — diagnose the whole setup and print concrete fixes.

@@ -265,3 +265,70 @@ independent review from the **`codex` MCP tool** (the same one `/cross-review` u
 3. **Stream Deck plugin**: `pnpm build` yields `.sdPlugin/bin/{plugin.js,loudini-helper}`; key faces show the level.
 
 All four ship together — the daemon plus three frontends, with the menu-bar app as the shared visual layer.
+
+## Signing
+
+`build-app.sh` picks the strongest signing identity present, so the same script covers dev and release.
+It looks for, in order: a **Developer ID Application** cert (release), the **"Loudini Dev"** self-signed
+cert (dev), then falls back to **ad-hoc**.
+
+### Stable signing (dev)
+
+macOS ties every TCC grant (Accessibility, Input Monitoring, Audio) to the app's code identity. Ad-hoc
+signing mints a new identity on every build, so grants reset each rebuild — you re-approve permissions
+constantly. A stable self-signed cert fixes it: the identity (a fixed certificate leaf) stays constant,
+so grants persist. Create it once:
+
+```sh
+cd "$(mktemp -d)"
+cat > cert.conf <<'EOF'
+[ req ]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[ dn ]
+CN = Loudini Dev
+[ v3 ]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, codeSigning
+EOF
+openssl req -x509 -newkey rsa:2048 -days 3650 -nodes -keyout key.pem -out cert.pem -config cert.conf
+# -legacy + SHA1 MAC: macOS's Security framework can't import OpenSSL 3's default PKCS#12 MAC.
+openssl pkcs12 -export -legacy -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
+  -out ident.p12 -inkey key.pem -in cert.pem -passout pass:loudini
+security import ident.p12 -k ~/Library/Keychains/login.keychain-db -P loudini -T /usr/bin/codesign -A
+```
+
+The cert lists as `CSSMERR_TP_NOT_TRUSTED` (self-signed) — that's fine, `codesign` still signs with it and
+the designated requirement stays stable (`identifier "gg.pim.loudini.menubar" and certificate leaf = H"…"`).
+After a build's identity changes (e.g. first switch from ad-hoc), reset any stale grants once:
+`tccutil reset Accessibility gg.pim.loudini.menubar` (and `ListenEvent`, `AudioCapture`), then re-approve.
+
+### Release signing & notarization
+
+For distribution to other users, ad-hoc/self-signed is a dead end: Gatekeeper blocks launch and grants
+don't persist. You need an Apple Developer account ($99/yr) → a **Developer ID Application** cert. Once
+that cert is in your keychain, `build-app.sh` uses it automatically (hardened runtime, secure timestamp,
+`loudini.entitlements`). Then notarize and staple:
+
+```sh
+# 1. Build (auto-detects the Developer ID and signs release-style).
+menubar/build-app.sh
+
+# 2. Zip and submit for notarization (needs an app-specific password or notarytool profile).
+ditto -c -k --keepParent menubar/Loudini.app /tmp/Loudini.zip
+xcrun notarytool submit /tmp/Loudini.zip --apple-id "you@example.com" \
+  --team-id "TEAMID" --password "app-specific-pw" --wait
+
+# 3. Staple the ticket into the bundle so it validates offline.
+xcrun stapler staple menubar/Loudini.app
+```
+
+Notes:
+- The private `IOAVService*` symbols (DDC brightness) are fine for notarization — that's not App Store
+  review. The Mac App Store is out anyway (private API + Input Monitoring + a bundled daemon); ship via
+  direct download or a Homebrew cask.
+- `loudini.entitlements` currently declares only `com.apple.security.device.audio-input` (for the audio
+  tap under the hardened runtime). Verify at first notarization; add entitlements only if the runtime or
+  `notarytool` log flags a specific denial.

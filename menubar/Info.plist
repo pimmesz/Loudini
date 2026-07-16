@@ -28,5 +28,7 @@
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Loudini captures app audio only to re-render it to your output device at your chosen volume. Nothing is recorded or stored.</string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>Loudini watches only the brightness keys, so it can control an external monitor macOS cannot dim itself. Keystrokes are never recorded or stored.</string>
 </dict>
 </plist>

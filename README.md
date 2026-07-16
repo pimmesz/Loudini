@@ -9,10 +9,6 @@ No driver, no kext, no admin rights. Loudini uses a driverless Core Audio **proc
 to your output device through a software gain. It **fails open** — if the daemon ever dies, macOS
 instantly restores the normal direct audio path. A crash can never leave you muted.
 
-> **⚠️ Replaces Background Music.** If you use [Background Music](https://github.com/kyleneideck/BackgroundMusic),
-> quit/uninstall it first. With BGM as the default output device, Loudini double-captures the mix and
-> feeds back. Loudini covers the same "software volume" job without a driver.
-
 ## Quick start (menu-bar app — the easiest path)
 
 ```sh
@@ -33,11 +29,12 @@ First run, in order:
    — or just look at the menu bar: the Loudini item shows the live level, and a ⚠︎ badge if anything
    still needs attention (the dropdown then contains the fix).
 
-> **⚠️ After every rebuild, re-grant.** The app is ad-hoc signed, so each rebuild changes its code
-> identity: macOS silently invalidates both grants **while the Settings toggles still show enabled**.
-> Fix: the menu's **Repair Volume-Key Permission…** item (Accessibility) and the
+> **⚠️ Ad-hoc builds: re-grant after every rebuild.** With ad-hoc signing each rebuild changes the
+> app's code identity, so macOS silently invalidates both grants **while the Settings toggles still
+> show enabled**. Fix: the menu's **Repair Volume-Key Permission…** item (Accessibility) and the
 > **Audio capture not working — click to fix** row (System Audio Recording), or
-> `tccutil reset Accessibility gg.pim.loudini.menubar` + relaunch.
+> `tccutil reset Accessibility gg.pim.loudini.menubar` + relaunch. **This goes away once you set up the
+> stable "Loudini Dev" cert** (see BUILD.md → Signing) — grants then survive rebuilds.
 
 ## Pick your frontend
 
@@ -66,6 +63,19 @@ With an external DDC-capable monitor attached, the menu-bar app also controls it
 - A second slider (sun icons) appears in the dropdown, and brightness changes get their own HUD.
 - All external displays move together for now. Intel Macs: the feature simply stays hidden.
 
+**The universal fallback — a hotkey bound to the CLI.** Some keyboards can't be reached by key
+capture at all: boards with no brightness keys, a Bluetooth Magic Keyboard with Touch ID (it hides its
+special keys over BT), or keys rerouted by vendor software (Logitech G HUB / Options+). For every one
+of these, bind the permission-free CLI to any shortcut instead:
+
+```sh
+loudini brightness up      # +6%   (loudini brightness down / set 50 / get)
+```
+
+DDC writes need no permission at all, so this works from macOS Shortcuts, Karabiner, BetterTouchTool, a
+Stream Deck key, or Raycast — see the appendix for a Karabiner recipe. This is the recommended path
+whenever the built-in key grab doesn't cover your keyboard.
+
 ### Keep the daemon alive without the app (LaunchAgent)
 
 ```sh
@@ -88,6 +98,8 @@ loudini mute          toggle mute
 loudini set <0-100>   set the volume
 loudini get           print: gain=42 muted=false running=true pipeline=true device="Scarlett 2i2 USB"
 loudini doctor        diagnose the whole setup (daemon, permissions, conflicts) with fixes
+loudini brightness up|down [step] | set <0-100> | get
+                      external-monitor brightness over DDC — needs NO permission, bind it to any key
 ```
 
 The subcommands only write `control.json` and exit instantly — the running daemon applies the change
@@ -145,13 +157,21 @@ and prints the exact fix for anything broken.
 
 ## Gotchas
 
-- **Background Music**: must be quit/uninstalled — see the warning at the top.
+- **Virtual audio devices as your default output** (Background Music, BlackHole routed as default,
+  eqMac): quit/uninstall them. Loudini taps the default output and re-renders back to it; a virtual
+  device that re-plays that audio creates a feedback loop. Loudini covers the same "software volume"
+  job without a driver, so it *replaces* Background Music rather than running alongside it.
 - **System Audio Recording permission** is granted per responsible process: under the LaunchAgent
   that's the daemon itself; when the Stream Deck app or the menu-bar app spawns the daemon, the
-  prompt names *that* app instead. Grant it once per app identity (so again after rebuilds — see the
-  Quick start warning).
+  prompt names *that* app instead. Grant it once per app identity (with ad-hoc signing that means again
+  after each rebuild — see the Quick start warning; the stable "Loudini Dev" cert removes that).
 - The macOS volume HUD stays the crossed-out one unless you use the menu-bar app (which replaces it
   with its own HUD) — Karabiner/BTT bindings change the volume without any HUD.
+- **AirPlay speakers work — as a system output.** Pick an AirPlay device in Control Center → Sound and
+  Loudini controls its volume like any other output (it follows the default output automatically). What
+  it *can't* touch is **in-app AirPlay** — the AirPlay button inside a Safari video or the Music/TV app,
+  which streams straight to the speaker and never passes through the Mac's audio output. No tap-based
+  tool can reach that path.
 
 ## Appendix: bind keys with Karabiner / BTT / skhd
 
@@ -191,6 +211,22 @@ Karabiner → Complex Modifications → Add rule:
 
 If your keyboard sends plain function keys instead (you enabled "Use F1, F2, etc. keys as standard
 function keys"), swap each `from` for `{ "key_code": "f12" }` / `"f11"` / `"f10"`.
+
+Add external-monitor **brightness** the same way (Karabiner captures these keys at the HID level, below
+where the menu-bar app's tap loses them):
+
+```json
+{
+  "type": "basic",
+  "from": { "consumer_key_code": "display_brightness_increment", "modifiers": { "optional": ["any"] } },
+  "to": [{ "shell_command": "$HOME/.local/bin/loudini brightness up" }]
+},
+{
+  "type": "basic",
+  "from": { "consumer_key_code": "display_brightness_decrement", "modifiers": { "optional": ["any"] } },
+  "to": [{ "shell_command": "$HOME/.local/bin/loudini brightness down" }]
+}
+```
 
 </details>
 

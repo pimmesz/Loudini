@@ -32,9 +32,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var deviceItem: NSMenuItem!
     private var conflictItem: NSMenuItem!
     private var grabKeysItem: NSMenuItem!
+    private var grabBrightnessItem: NSMenuItem!
+    private var inputMonitoringItem: NSMenuItem!
     private var fixPermissionItem: NSMenuItem!
     private var accessibilityItem: NSMenuItem!
     private var loginItem: NSMenuItem!
+    private var brightnessItem: NSMenuItem!
+    private var brightnessSlider: NSSlider!
+
+    /// External-monitor brightness over DDC (no daemon involved).
+    private let ddc = DDCBrightness()
+    private var wantsBrightnessGrab = true
+    /// HID route for third-party keyboards whose brightness keys never become
+    /// NX media-key events (e.g. Logitech).
+    private var brightnessKeys: BrightnessKeyListener?
 
     private var keyTap: VolumeKeyTap?
     private var statusWatcher: StatusWatcher!
@@ -83,11 +94,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         setupKeyTap(promptIfNeeded: true)
         startKeyTapWatchdog()
+
+        // Displays come and go — re-enumerate the DDC targets when they do.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.ddc.rediscover()
+        }
+
+        // Brightness keys, HID route (same gate as the NX route).
+        brightnessKeys = BrightnessKeyListener { [weak self] up in
+            guard let self, self.wantsBrightnessGrab, self.ddc.isAvailable,
+                  !Self.builtInDisplayActive() else { return }
+            self.nudgeBrightness(up ? Self.step : -Self.step)
+        }
+        brightnessKeys?.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         isQuitting = true
         keyTap?.stop()
+        brightnessKeys?.stop()
         statusWatcher.stop()
         axRetryTimer?.invalidate()
         daemonRetryTimer?.invalidate()
@@ -146,6 +174,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sliderItem.view = row
         menu.addItem(sliderItem)
 
+        // Brightness row (external DDC displays); hidden when unavailable.
+        brightnessItem = NSMenuItem()
+        let bRow = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 30))
+        let dim = NSImageView(frame: NSRect(x: 14, y: 8, width: 14, height: 14))
+        dim.image = NSImage(systemSymbolName: "sun.min.fill", accessibilityDescription: nil)
+        dim.contentTintColor = .secondaryLabelColor
+        let brightIcon = NSImageView(frame: NSRect(x: 250, y: 7, width: 17, height: 16))
+        brightIcon.image = NSImage(systemSymbolName: "sun.max.fill", accessibilityDescription: nil)
+        brightIcon.contentTintColor = .secondaryLabelColor
+        brightnessSlider = NSSlider(value: 50, minValue: 0, maxValue: 100,
+                                    target: self, action: #selector(brightnessSliderMoved(_:)))
+        brightnessSlider.isContinuous = true
+        brightnessSlider.frame = NSRect(x: 34, y: 3, width: 210, height: 24)
+        bRow.addSubview(dim)
+        bRow.addSubview(brightnessSlider)
+        bRow.addSubview(brightIcon)
+        brightnessItem.view = bRow
+        brightnessItem.isHidden = true
+        menu.addItem(brightnessItem)
+
         // No key equivalent: ⌘M reads as the system Minimize shortcut, and the
         // hardware mute key already covers this.
         muteItem = NSMenuItem(title: "Mute", action: #selector(muteClicked), keyEquivalent: "")
@@ -176,6 +224,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         grabKeysItem.state = .on
         grabKeysItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
         menu.addItem(grabKeysItem)
+
+        grabBrightnessItem = NSMenuItem(title: "Grab Brightness Keys",
+                                        action: #selector(toggleGrabBrightness), keyEquivalent: "")
+        grabBrightnessItem.target = self
+        grabBrightnessItem.state = .on
+        grabBrightnessItem.isHidden = true
+        grabBrightnessItem.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: nil)
+        menu.addItem(grabBrightnessItem)
+
+        // Brightness keys on third-party keyboards need Input Monitoring to be
+        // captured at the HID layer. Shown only when that's the missing piece.
+        inputMonitoringItem = NSMenuItem(title: "Enable Brightness Keys (Input Monitoring)…",
+                                         action: #selector(enableInputMonitoring), keyEquivalent: "")
+        inputMonitoringItem.target = self
+        inputMonitoringItem.isHidden = true
+        inputMonitoringItem.image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)
+        menu.addItem(inputMonitoringItem)
 
         // The rebuild-invalidated-grant trap: Settings shows the toggle ON while
         // macOS denies the new binary. One click wipes our TCC entry and
@@ -223,6 +288,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         refreshPermissionUI()
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        brightnessItem.isHidden = !ddc.isAvailable
+        grabBrightnessItem.isHidden = !ddc.isAvailable
+        // Offer the Input Monitoring fix only when brightness is wanted but the
+        // HID capture can't run for lack of it.
+        inputMonitoringItem.isHidden = !(ddc.isAvailable && wantsBrightnessGrab
+                                         && !BrightnessKeyListener.accessGranted)
+        if ddc.isAvailable { brightnessSlider.doubleValue = Double(ddc.percent) }
         if let rival = mediaKeyRival() {
             conflictItem.title = "\(rival) may intercept the volume keys"
             conflictItem.toolTip = "If the keys don't reach Loudini, disable volume-key handling in "
@@ -344,12 +416,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleVolumeKey(_ key: VolumeKeyTap.Key) {
-        writeControlChange {
-            switch key {
-            case .up: return try ControlOps.nudge(Self.step)
-            case .down: return try ControlOps.nudge(-Self.step)
-            case .mute: return try ControlOps.toggleMute()
-            }
+        switch key {
+        case .up: writeControlChange { try ControlOps.nudge(Self.step) }
+        case .down: writeControlChange { try ControlOps.nudge(-Self.step) }
+        case .mute: writeControlChange { try ControlOps.toggleMute() }
+        case .brightnessUp: nudgeBrightness(Self.step)
+        case .brightnessDown: nudgeBrightness(-Self.step)
+        }
+    }
+
+    private func nudgeBrightness(_ delta: Int) {
+        ddc.nudge(delta) { [weak self] percent in
+            guard let self, !self.isQuitting else { return }
+            self.brightnessSlider.doubleValue = Double(percent)
+            self.hud.show(brightnessPercent: percent)
+        }
+    }
+
+    @objc private func brightnessSliderMoved(_ sender: NSSlider) {
+        ddc.set(Int(sender.doubleValue.rounded())) { _ in }
+    }
+
+    @objc private func toggleGrabBrightness() {
+        wantsBrightnessGrab.toggle()
+        grabBrightnessItem.state = wantsBrightnessGrab ? .on : .off
+    }
+
+    /// Register the app for Input Monitoring (adds it to the list + prompts),
+    /// then open that settings pane so the user can flip the toggle.
+    @objc private func enableInputMonitoring() {
+        BrightnessKeyListener.requestAccess()
+        brightnessKeys?.start()  // ensure the manager is open so macOS lists us
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// True when the built-in panel is active — macOS should keep the
+    /// brightness keys then; Loudini only owns them for external-only setups.
+    private static func builtInDisplayActive() -> Bool {
+        NSScreen.screens.contains { screen in
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+                as? CGDirectDisplayID else { return false }
+            return CGDisplayIsBuiltin(id) != 0
         }
     }
 
@@ -377,6 +486,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return false }
                 return self.lastStatusRunning && self.lastPipelineOK
             }
+            // Brightness is owned solely by the HID listener (BrightnessKeyListener):
+            // in the only case Loudini drives brightness — external DDC display, no
+            // built-in — macOS never emits the NX brightness event anyway, so routing
+            // it here too would just double-nudge on the rare setup where it does fire.
+            // Leave shouldConsumeBrightness at its default (false): the NX tap is volume-only.
             if tap.start() {
                 keyTap = tap
             } else {
@@ -404,6 +518,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if self.wantsKeyGrab, self.keyTap == nil, trusted {
                 self.setupKeyTap(promptIfNeeded: false)
             }
+            // Picks the brightness keys up once Input Monitoring is granted,
+            // without needing a relaunch. No-op while it's already running.
+            if self.wantsBrightnessGrab { self.brightnessKeys?.start() }
             self.refreshPermissionUI()
             self.renderStatusItem()
         }

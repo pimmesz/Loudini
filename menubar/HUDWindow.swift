@@ -60,11 +60,23 @@ final class HUDWindow {
 
     /// Show (or refresh) the HUD; it fades out ~1 s after the last call.
     func show(gain: Int, muted: Bool) {
-        let symbol = muted ? "speaker.slash.fill" : speakerSymbolName(for: gain)
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "volume")
-        label.stringValue = muted ? "Muted" : "Volume \(gain)%"
-        bar.doubleValue = Double(gain)
-        bar.alphaValue = muted ? 0.4 : 1
+        show(symbol: muted ? "speaker.slash.fill" : speakerSymbolName(for: gain),
+             text: muted ? "Muted" : "Volume \(gain)%",
+             value: gain, dimmedBar: muted)
+    }
+
+    /// Brightness variant — same panel, sun icon.
+    func show(brightnessPercent: Int) {
+        show(symbol: brightnessPercent <= 33 ? "sun.min.fill" : "sun.max.fill",
+             text: "Brightness \(brightnessPercent)%",
+             value: brightnessPercent, dimmedBar: false)
+    }
+
+    private func show(symbol: String, text: String, value: Int, dimmedBar: Bool) {
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
+        label.stringValue = text
+        bar.doubleValue = Double(value)
+        bar.alphaValue = dimmedBar ? 0.4 : 1
 
         if let screen = NSScreen.main {
             let f = screen.visibleFrame
