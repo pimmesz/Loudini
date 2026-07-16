@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loudini — the master volume macOS wouldn't give you</title>
+<meta name="description" content="Loudini restores working volume keys, a HUD, and a real software master volume for any audio output — including pro interfaces like the Focusrite Scarlett. Free, open source, fails open by design.">
+<link rel="canonical" href="https://pimmesz.github.io/Loudini/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Loudini — the master volume macOS wouldn't give you">
+<meta property="og:description" content="Working volume keys, a HUD, and a real software master volume for any audio output — including pro interfaces like the Focusrite Scarlett. Free, open source, fails open by design.">
+<meta property="og:url" content="https://pimmesz.github.io/Loudini/">
+<meta property="og:site_name" content="Loudini">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Loudini — the master volume macOS wouldn't give you">
+<meta name="twitter:description" content="Working volume keys, a HUD, and a real software master volume for any audio output — even pro interfaces. Free & open source.">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Cdefs%3E%3CradialGradient id='b' cx='72%25' cy='24%25' r='96%25'%3E%3Cstop offset='0' stop-color='%231B2054'/%3E%3Cstop offset='.5' stop-color='%230E1232'/%3E%3Cstop offset='1' stop-color='%2307091B'/%3E%3C/radialGradient%3E%3ClinearGradient id='m' x1='220' y1='720' x2='760' y2='270' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23FF3CAC'/%3E%3Cstop offset='.48' stop-color='%23865DFF'/%3E%3Cstop offset='1' stop-color='%2320D9FF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='51' y='51' width='922' height='922' rx='207' fill='url(%23b)'/%3E%3Cpath d='M218 478C218 467 227 458 238 458H284L382 378V646L284 566H238C227 566 218 557 218 546Z' fill='url(%23m)'/%3E%3Cg fill='none' stroke='url(%23m)' stroke-width='56' stroke-linecap='round'%3E%3Cpath d='M506 356A220 220 0 0 1 506 668'/%3E%3Cpath d='M640 222A410 410 0 0 1 640 802'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #07091B;
+    --panel: #0e1126;
+    --line: rgba(255, 255, 255, 0.08);
+    --t1: #f4f5fa;   /* primary */
+    --t2: #b8bccb;   /* secondary */
+    --t3: #8a8fa3;   /* tertiary */
+    --t4: #5d6175;   /* quaternary */
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  /* clip, not hidden: the stage glow extends past the viewport; clip keeps the
+     document from growing wider than the screen on mobile */
+  html { color-scheme: dark; overflow-x: clip; }
+  body {
+    background: var(--bg);
+    color: var(--t2);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: clip;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.4rem; }
+  a { color: var(--t1); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  a:focus-visible, .btn:focus-visible, [role="slider"]:focus-visible {
+    outline: 1.5px solid var(--t2); outline-offset: 3px; border-radius: 4px;
+  }
+  code, kbd { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.88em; }
+
+  /* one motion system: rise + fade, staggered */
+  .rise { opacity: 0; transform: translateY(20px); animation: rise 0.7s cubic-bezier(0.2, 0.6, 0.25, 1) forwards; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+  .d1 { animation-delay: 0.05s; } .d2 { animation-delay: 0.15s; } .d3 { animation-delay: 0.25s; }
+  .d4 { animation-delay: 0.4s; } .d5 { animation-delay: 0.55s; }
+  @media (prefers-reduced-motion: reduce) {
+    .rise { animation: none; opacity: 1; transform: none; }
+    * { transition: none !important; }
+  }
+
+  /* top row */
+  .top { display: flex; justify-content: space-between; align-items: center; padding: 1.4rem 0; }
+  .top .mark { font-weight: 590; color: var(--t1); font-size: 0.95rem; }
+  .top a.gh { color: var(--t3); font-size: 0.9rem; }
+
+  /* hero */
+  .hero { text-align: center; padding: 4.2rem 0 3.2rem; }
+  .hero .icon { width: 96px; height: 96px; margin: 0 auto 2rem; display: block;
+                filter: drop-shadow(0 18px 50px rgba(10, 6, 40, 0.8)); }
+  h1 {
+    color: var(--t1);
+    font-size: clamp(1.9rem, 5vw, 3rem);
+    font-weight: 530;
+    letter-spacing: -0.022em;
+    line-height: 1.12;
+    max-width: 21ch;
+    margin: 0 auto;
+    text-wrap: balance;
+  }
+  .hero .sub { max-width: 44ch; margin: 1.2rem auto 0; color: var(--t3); }
+  .hero .sub strong { color: var(--t2); font-weight: 500; }
+  .btn {
+    display: inline-block; margin-top: 2rem;
+    background: var(--t1); color: var(--bg);
+    font-weight: 570; font-size: 0.95rem;
+    padding: 0.7rem 1.6rem; border-radius: 10px;
+  }
+  .btn:hover { text-decoration: none; opacity: 0.88; }
+  .trust { margin-top: 1.1rem; font-size: 0.85rem; color: var(--t3); }
+  .trust a { color: var(--t2); }
+
+  /* ---- the real product, rebuilt ---- */
+  .stage { position: relative; padding: 1rem 0 0; display: flex; justify-content: center; }
+  .stage::before {
+    content: ""; position: absolute; inset: -4rem -8rem;
+    background: radial-gradient(48% 42% at 50% 45%, rgba(134, 93, 255, 0.10), transparent 70%);
+    pointer-events: none;
+  }
+  .frame {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 2.6rem 2.6rem 5.4rem;
+  }
+  @media (max-width: 560px) { .frame { padding: 1.4rem 1rem 5rem; } }
+
+  /* the menu-bar dropdown, faithful to the shipping app */
+  .menu {
+    width: 280px;
+    background: rgba(32, 34, 51, 0.92);
+    backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-top-color: rgba(255, 255, 255, 0.2);
+    border-radius: 12px;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
+    padding: 5px;
+    font-size: 13px;
+    color: #e8e9f0;
+    user-select: none;
+  }
+  .menu .hrow { display: flex; align-items: center; gap: 8px; padding: 7px 9px 5px; }
+  .menu .hrow .mlogo { width: 20px; height: 20px; }
+  .menu .hrow .mname { font-weight: 600; }
+  .menu .hrow .mlevel { margin-left: auto; color: #9fa3b5; font-variant-numeric: tabular-nums; }
+  .menu .sep { height: 1px; background: rgba(255, 255, 255, 0.1); margin: 4px 10px; }
+  .menu .row { display: flex; align-items: center; gap: 9px; padding: 5px 9px; border-radius: 7px; color: #d5d7e2; }
+  .menu .row .sf { width: 15px; text-align: center; color: #9fa3b5; flex: 0 0 15px; }
+  .menu .row .check { margin-left: auto; color: #9fa3b5; }
+  .menu .row.dim { color: #8b8fa1; }
+  /* emoji glyphs rendered monochrome, like the template icons in a real menu */
+  .menu .sf, .hud .hicon { filter: grayscale(1) brightness(1.55); opacity: 0.8; }
+
+  /* macOS-style slider (matches the app's NSSlider rows) */
+  .sliderrow { display: flex; align-items: center; gap: 9px; padding: 7px 9px; }
+  .slider { flex: 1; position: relative; height: 16px; cursor: default; touch-action: none; }
+  .slider .tr { position: absolute; left: 0; right: 0; top: 50%; height: 4px; transform: translateY(-50%);
+                border-radius: 2px; background: rgba(255, 255, 255, 0.22); }
+  .slider .fl { position: absolute; left: 0; top: 50%; height: 4px; width: var(--v, 72%); transform: translateY(-50%);
+                border-radius: 2px; background: #d8dae4; }
+  .slider .kn { position: absolute; top: 50%; left: var(--v, 72%); width: 15px; height: 15px;
+                transform: translate(-50%, -50%); border-radius: 50%;
+                background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); }
+  .slider.live { cursor: grab; }
+  .slider.live:active { cursor: grabbing; }
+
+  /* the HUD, exactly as the app draws it */
+  .hud {
+    position: absolute; left: 50%; bottom: 1.3rem; transform: translateX(-50%);
+    width: 240px; height: 64px;
+    background: rgba(38, 40, 58, 0.9);
+    backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 14px;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+    display: flex; align-items: center; gap: 10px; padding: 0 16px;
+    opacity: 0; transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  .hud.show { opacity: 1; transition-duration: 0s; }
+  .hud .hicon { width: 26px; text-align: center; font-size: 16px; }
+  .hud .hbody { flex: 1; }
+  .hud .hlabel { font-size: 13px; font-weight: 500; color: #eceef5; line-height: 1.2; margin-bottom: 6px; }
+  .hud .hbar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.18); overflow: hidden; }
+  .hud .hbar i { display: block; height: 100%; width: var(--v, 72%); background: #e6e8f2; border-radius: 3px; }
+
+  .caption { text-align: center; color: var(--t3); font-size: 0.85rem; margin-top: 1.1rem; }
+
+  /* sections */
+  section { padding: 3.6rem 0 0; }
+  .duo {
+    color: var(--t3); font-size: 1.35rem; font-weight: 530;
+    letter-spacing: -0.015em; line-height: 1.45;
+    max-width: 44ch; margin: 0 auto; text-align: center;
+    text-wrap: balance;
+  }
+  .duo strong { color: var(--t1); font-weight: 530; }
+  .duo + .duo { margin-top: 2.4rem; }
+  .duo code, .duo .kbdrow { white-space: nowrap; }
+  kbd {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    color: var(--t2);
+    border-radius: 5px; padding: 1px 7px;
+    font-size: 0.72em; font-weight: 500; letter-spacing: 0.02em;
+  }
+
+  /* section labels: quieter than the statements above them, deliberately */
+  h2 {
+    color: var(--t3); font-size: 0.8rem; font-weight: 590;
+    letter-spacing: 0.09em; text-transform: uppercase;
+    margin-bottom: 1.2rem; text-align: center;
+  }
+  .term {
+    background: #05060f;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1.05rem 1.25rem;
+    overflow-x: auto;
+    font-size: 0.86rem; line-height: 1.8;
+  }
+  .term .c { color: var(--t3); }
+  .term .p { color: var(--t3); user-select: none; }
+  .postinstall { margin: 0.9rem auto 0; font-size: 0.9rem; color: var(--t3); max-width: 52ch; }
+
+  /* limits */
+  .limits { color: var(--t3); font-size: 0.95rem; max-width: 54ch; margin: 0 auto; }
+  .limits p + p { margin-top: 0.7rem; }
+  .limits strong { color: var(--t2); font-weight: 550; }
+
+  /* watermark footer — the one indulgence */
+  footer { margin-top: 5rem; position: relative; }
+  footer .meta {
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem;
+    padding: 1.4rem 0 0.5rem; border-top: 1px solid var(--line);
+    color: var(--t4); font-size: 0.85rem;
+  }
+  footer .meta a { color: var(--t3); text-decoration: underline; text-underline-offset: 3px; }
+  .watermark {
+    display: block; text-align: center;
+    font-size: clamp(6rem, 22vw, 13rem);
+    font-weight: 700; letter-spacing: -0.045em; line-height: 1;
+    background: linear-gradient(180deg, rgba(134, 93, 255, 0.4), rgba(134, 93, 255, 0) 78%),
+                linear-gradient(100deg, #FF3CAC, #865DFF 48%, #20D9FF);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    opacity: 0.5;
+    height: 0.62em; overflow: hidden;
+    transform: translateY(0.06em);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="top rise d1">
+    <span class="mark">Loudini</span>
+    <a class="gh" href="https://github.com/pimmesz/Loudini">GitHub &rarr;</a>
+  </div>
+
+  <main>
+    <section class="hero">
+      <svg class="icon rise d1" viewBox="0 0 1024 1024" role="img" aria-label="Loudini app icon">
+        <defs>
+          <radialGradient id="bg" cx="72%" cy="24%" r="96%">
+            <stop offset="0" stop-color="#1B2054"/><stop offset="0.5" stop-color="#0E1232"/><stop offset="1" stop-color="#07091B"/>
+          </radialGradient>
+          <linearGradient id="mk" x1="220" y1="720" x2="760" y2="270" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#FF3CAC"/><stop offset="0.48" stop-color="#865DFF"/><stop offset="1" stop-color="#20D9FF"/>
+          </linearGradient>
+        </defs>
+        <rect x="51" y="51" width="922" height="922" rx="207" fill="url(#bg)" stroke="rgba(255,255,255,0.09)" stroke-width="6"/>
+        <path d="M218 478C218 467 227 458 238 458H284L382 378V646L284 566H238C227 566 218 557 218 546Z" fill="url(#mk)"/>
+        <g fill="none" stroke="url(#mk)" stroke-width="56" stroke-linecap="round">
+          <path d="M506 356A220 220 0 0 1 506 668"/><path d="M640 222A410 410 0 0 1 640 802"/>
+        </g>
+      </svg>
+
+      <h1 class="rise d2">The master volume macOS wouldn't give you.</h1>
+      <p class="sub rise d3">Working volume keys, a HUD, and a real software gain for any audio output —
+      including pro interfaces like the <strong>Focusrite Scarlett</strong>, where macOS only shows the
+      crossed-out volume HUD.</p>
+      <a class="btn rise d3" href="https://github.com/pimmesz/Loudini">View on GitHub</a>
+      <p class="trust rise d3">Free &amp; open source &middot; macOS 14.4+ &middot; no drivers, no kexts &middot; fails open by design</p>
+    </section>
+
+    <div class="stage rise d4">
+      <div class="frame">
+        <div class="menu" role="group" aria-label="Loudini's menu bar dropdown, recreated — the volume slider works">
+          <div class="hrow">
+            <svg class="mlogo" viewBox="0 0 1024 1024" aria-hidden="true">
+              <path d="M218 478C218 467 227 458 238 458H284L382 378V646L284 566H238C227 566 218 557 218 546Z" fill="url(#mk)"/>
+              <g fill="none" stroke="url(#mk)" stroke-width="56" stroke-linecap="round">
+                <path d="M506 356A220 220 0 0 1 506 668"/><path d="M640 222A410 410 0 0 1 640 802"/>
+              </g>
+            </svg>
+            <span class="mname">Loudini</span>
+            <span class="mlevel" id="mlevel">72%</span>
+          </div>
+          <div class="sep"></div>
+          <div class="sliderrow">
+            <span class="sf" aria-hidden="true">&#128264;</span>
+            <div class="slider live" id="vslider" role="slider" tabindex="0" aria-label="Loudini volume"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="72" style="--v: 72%;">
+              <div class="tr"></div><div class="fl"></div><div class="kn"></div>
+            </div>
+            <span class="sf" aria-hidden="true">&#128266;</span>
+          </div>
+          <div class="sliderrow" aria-hidden="true">
+            <span class="sf">&#9728;&#65038;</span>
+            <div class="slider" style="--v: 55%;"><div class="tr"></div><div class="fl"></div><div class="kn"></div></div>
+            <span class="sf">&#9728;</span>
+          </div>
+          <div class="row" aria-hidden="true"><span class="sf">&#128263;</span>Mute</div>
+          <div class="row dim" aria-hidden="true"><span class="sf">&#128362;</span>Output: Scarlett 2i2 4th Gen</div>
+          <div class="sep"></div>
+          <div class="row" aria-hidden="true"><span class="sf">&#9000;</span>Grab Volume Keys<span class="check">&#10003;</span></div>
+          <div class="row" aria-hidden="true"><span class="sf">&#9728;</span>Grab Brightness Keys<span class="check">&#10003;</span></div>
+          <div class="sep"></div>
+          <div class="row" aria-hidden="true"><span class="sf">&#8618;</span>Launch at Login</div>
+          <div class="row" aria-hidden="true"><span class="sf">&#10005;</span>Quit Loudini</div>
+        </div>
+
+        <div class="hud" id="hud" aria-hidden="true">
+          <span class="hicon" id="hudicon">&#128266;</span>
+          <span class="hbody">
+            <span class="hlabel" id="hudlabel">Volume 72%</span>
+            <span class="hbar"><i id="hudfill" style="--v: 72%;"></i></span>
+          </span>
+        </div>
+      </div>
+    </div>
+    <p class="caption rise d4">The real dropdown, rebuilt — drag the volume slider.</p>
+
+    <section>
+      <p class="duo"><strong>It fails open.</strong> A crash can never mute you.</p>
+      <p class="duo"><strong>Nothing is recorded.</strong> No driver, no kext, no admin rights.</p>
+      <p class="duo"><span class="kbdrow"><kbd>F1</kbd> <kbd>F2</kbd></span> <strong>work too.</strong>
+      Brightness for external monitors.</p>
+      <p class="duo"><strong>Scriptable everywhere.</strong> <code>loudini</code> from any hotkey tool.</p>
+    </section>
+
+    <section>
+      <h2>Install</h2>
+      <div class="term">
+        <pre><code><span class="p">$</span> git clone https://github.com/pimmesz/Loudini.git && cd Loudini
+<span class="p">$</span> menubar/build-app.sh && open menubar/Loudini.app
+<span class="c"># builds the daemon + CLI, bundles them into the app, signs, launches</span></code></pre>
+      </div>
+      <p class="postinstall">macOS asks for Accessibility (the volume keys) and System Audio Recording
+      (the engine) on first run — and Input Monitoring only if you want the brightness keys.
+      Headless setups: <code>scripts/install-daemon.sh</code> + <code>scripts/install-cli.sh</code>.</p>
+    </section>
+
+    <section>
+      <h2>Honest limits</h2>
+      <div class="limits">
+        <p><strong>In-app AirPlay is unreachable.</strong> The AirPlay button inside Safari or Music
+        streams straight to the speaker — that audio never enters CoreAudio, so no tap-based tool can
+        control it. Select the AirPlay device as your system output instead, and Loudini controls it fully.</p>
+        <p><strong>Intel Macs</strong> get everything except brightness. <strong>Keyboards without
+        brightness keys</strong> can bind <code>loudini brightness up/down</code> to any shortcut — that
+        path needs no permissions at all.</p>
+      </div>
+    </section>
+
+    <section style="text-align: center;">
+      <p class="duo"><strong>Your interface already sounds right.</strong> Give it volume keys.</p>
+      <a class="btn" href="https://github.com/pimmesz/Loudini" style="margin-top: 1.6rem;">Read the full docs</a>
+    </section>
+  </main>
+
+  <footer>
+    <div class="meta">
+      <span>Loudini &middot; built for macOS</span>
+      <span><a href="https://github.com/pimmesz/Loudini">Source &amp; issues</a> &middot; v0.1.0</span>
+    </div>
+  </footer>
+</div>
+<span class="watermark" aria-hidden="true">loudini</span>
+
+<script>
+(function () {
+  var slider = document.getElementById('vslider');
+  var level = document.getElementById('mlevel');
+  var hud = document.getElementById('hud');
+  var hudlabel = document.getElementById('hudlabel');
+  var hudfill = document.getElementById('hudfill');
+  var hudicon = document.getElementById('hudicon');
+  var hideTimer = null;
+  var pct = 72;
+
+  function icon(p) { return p === 0 ? '🔈' : p <= 33 ? '🔉' : '🔊'; }
+
+  function render(showHud) {
+    slider.style.setProperty('--v', pct + '%');
+    slider.setAttribute('aria-valuenow', String(pct));
+    level.textContent = pct + '%';
+    if (!showHud) return;
+    hudlabel.textContent = 'Volume ' + pct + '%';
+    hudfill.style.setProperty('--v', pct + '%');
+    hudicon.textContent = icon(pct);
+    // the shipping behavior: retarget to visible instantly, fade 1.0s after the last change
+    hud.classList.add('show');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function () { hud.classList.remove('show'); }, 1000);
+  }
+
+  function setPct(v, showHud) {
+    pct = Math.max(0, Math.min(100, Math.round(v)));
+    render(showHud);
+  }
+
+  var dragRect = null;
+  function fromEvent(e) {
+    var r = dragRect || slider.getBoundingClientRect();
+    setPct(((e.clientX - r.left) / r.width) * 100, true);
+  }
+
+  slider.addEventListener('pointerdown', function (e) {
+    if (!e.isPrimary || e.button !== 0) return;
+    dragRect = slider.getBoundingClientRect();
+    slider.setPointerCapture(e.pointerId);
+    fromEvent(e);
+  });
+  slider.addEventListener('pointermove', function (e) { if (e.buttons && dragRect) fromEvent(e); });
+  slider.addEventListener('pointerup', function () { dragRect = null; });
+  slider.addEventListener('pointercancel', function () { dragRect = null; });
+
+  // Show the HUD once after the stage settles, so the resting page demonstrates
+  // the behavior the headline promises instead of hiding it behind a drag.
+  setTimeout(function () { render(true); }, 1600);
+  slider.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') setPct(pct + 6, true);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') setPct(pct - 6, true);
+    else if (e.key === 'Home') setPct(0, true);
+    else if (e.key === 'End') setPct(100, true);
+    else return;
+    e.preventDefault();
+  });
+})();
+</script>
+
+</body>
+</html>
