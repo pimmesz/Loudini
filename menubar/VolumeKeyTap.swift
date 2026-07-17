@@ -21,7 +21,9 @@ final class VolumeKeyTap {
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private let handler: (Key) -> Void
+    /// `fine` is true when Shift is held — a request for a small, 1-per-press
+    /// adjustment instead of the coarse default step.
+    private let handler: (_ key: Key, _ fine: Bool) -> Void
 
     /// Consulted per event, on the main run loop. When false, volume keys pass
     /// through to macOS untouched — Loudini only owns them while its daemon is
@@ -34,7 +36,7 @@ final class VolumeKeyTap {
 
     /// `handler` is called on the main run loop (where the tap lives); it must
     /// not block — hand real work to another queue.
-    init(handler: @escaping (Key) -> Void) {
+    init(handler: @escaping (_ key: Key, _ fine: Bool) -> Void) {
         self.handler = handler
     }
 
@@ -111,7 +113,9 @@ final class VolumeKeyTap {
         guard willConsume else {
             return Unmanaged.passUnretained(cgEvent)
         }
-        if isKeyDown { handler(key) }
+        // Shift → fine (1-per-press) adjustment. Read from the live CGEvent
+        // flags, which carry the current modifier state for the media key.
+        if isKeyDown { handler(key, cgEvent.flags.contains(.maskShift)) }
         return nil  // consume down AND up so macOS never reacts to the key
     }
 }

@@ -40,7 +40,7 @@ First run, in order:
 
 | Frontend | Needs | What you get |
 |---|---|---|
-| **Menu-bar app** (`menubar/`) | Accessibility + System Audio Recording | Volume keys just work; live level in the menu bar (+ ⚠︎ when broken); volume + brightness sliders, mute, HUD; Start at Login; self-repair actions |
+| **Menu-bar app** (`menubar/`) | Accessibility + System Audio Recording | Volume keys just work (hold **⇧ Shift** for 1% fine steps); live level in the menu bar (+ ⚠︎ when broken); volume + brightness sliders, mute, HUD; Start at Login; self-repair actions |
 | **CLI** (`scripts/install-cli.sh`) | a running daemon (app or LaunchAgent) | `loudini up/down/mute/set/get/doctor` from any terminal or hotkey tool |
 | **Stream Deck** (`plugin/`) | Stream Deck app | Up/Down/Mute keys, faces show the live level (`42%` / 🔇 / ⚠︎) |
 | **Karabiner / BTT / skhd** | that tool + the CLI | Bind any key to the CLI — recipe in the appendix |
