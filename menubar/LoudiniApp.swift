@@ -37,7 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var fixPermissionItem: NSMenuItem!
     private var accessibilityItem: NSMenuItem!
     private var loginItem: NSMenuItem!
+    private var monoIconItem: NSMenuItem!
     private var brightnessItem: NSMenuItem!
+
+    /// When on, the menu-bar logo renders as a template (single colour that
+    /// follows the menu-bar text), so it blends in with other monochrome icons.
+    private var wantsMonoIcon = UserDefaults.standard.bool(forKey: "monoIcon")
     private var brightnessSlider: NSSlider!
 
     /// External-monitor brightness over DDC (no daemon involved).
@@ -268,6 +273,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loginItem.image = NSImage(systemSymbolName: "arrow.right.circle", accessibilityDescription: nil)
         menu.addItem(loginItem)
 
+        monoIconItem = NSMenuItem(title: "Monochrome Icon",
+                                  action: #selector(toggleMonoIcon), keyEquivalent: "")
+        monoIconItem.target = self
+        monoIconItem.state = wantsMonoIcon ? .on : .off
+        monoIconItem.image = NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: nil)
+        menu.addItem(monoIconItem)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Loudini", action: #selector(quitClicked), keyEquivalent: "q")
@@ -370,9 +382,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let healthy = lastStatusRunning && lastPipelineOK
         let keysDead = wantsKeyGrab && keyTap?.isRunning != true
         let badge = keysDead || (lastStatusRunning && !lastPipelineOK) ? " ⚠︎" : ""
-        if let logo = Self.menuBarLogo {
+        if let logo = Self.menuBarLogo?.copy() as? NSImage {
             // Brand logo + live level, so the menu bar still shows how loud
-            // Loudini is at a glance.
+            // Loudini is at a glance. In monochrome mode the logo renders as a
+            // template so macOS paints it in the menu-bar text colour, letting
+            // it blend in with other single-colour icons (and adapt to light/dark).
+            logo.isTemplate = wantsMonoIcon
             button.image = logo
             button.imagePosition = .imageLeft
             button.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
@@ -550,6 +565,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyTap = nil
             refreshPermissionUI()
         }
+        renderStatusItem()
+    }
+
+    @objc private func toggleMonoIcon() {
+        wantsMonoIcon.toggle()
+        UserDefaults.standard.set(wantsMonoIcon, forKey: "monoIcon")
+        monoIconItem.state = wantsMonoIcon ? .on : .off
         renderStatusItem()
     }
 
