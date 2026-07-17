@@ -113,7 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         brightnessKeys = BrightnessKeyListener { [weak self] up in
             guard let self, self.wantsBrightnessGrab, self.ddc.isAvailable,
                   !Self.builtInDisplayActive() else { return }
-            self.nudgeBrightness(up ? Self.step : -Self.step)
+            // Shift → fine (1%) adjustment, matching the volume keys and the
+            // NX/tap brightness route (handleVolumeKey fine:). The HID callback
+            // carries no modifier, so read the live global modifier state here.
+            let step = NSEvent.modifierFlags.contains(.shift) ? Self.fineStep : Self.step
+            self.nudgeBrightness(up ? step : -step)
         }
         brightnessKeys?.start()
     }
