@@ -24,6 +24,7 @@ enum LoudiniMain {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let step = 6  // % per key press — matches the CLI and Stream Deck
+    private static let fineStep = 1  // % per key press when Shift is held (small adjust)
 
     private var statusItem: NSStatusItem!
     private var slider: NSSlider!
@@ -415,13 +416,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         writeControlChange { try ControlOps.toggleMute() }
     }
 
-    private func handleVolumeKey(_ key: VolumeKeyTap.Key) {
+    private func handleVolumeKey(_ key: VolumeKeyTap.Key, fine: Bool) {
+        let step = fine ? Self.fineStep : Self.step
         switch key {
-        case .up: writeControlChange { try ControlOps.nudge(Self.step) }
-        case .down: writeControlChange { try ControlOps.nudge(-Self.step) }
+        case .up: writeControlChange { try ControlOps.nudge(step) }
+        case .down: writeControlChange { try ControlOps.nudge(-step) }
         case .mute: writeControlChange { try ControlOps.toggleMute() }
-        case .brightnessUp: nudgeBrightness(Self.step)
-        case .brightnessDown: nudgeBrightness(-Self.step)
+        case .brightnessUp: nudgeBrightness(step)
+        case .brightnessDown: nudgeBrightness(-step)
         }
     }
 
@@ -477,7 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if trusted {
             UserDefaults.standard.set(true, forKey: "wasEverAXTrusted")
-            let tap = VolumeKeyTap { [weak self] key in self?.handleVolumeKey(key) }
+            let tap = VolumeKeyTap { [weak self] key, fine in self?.handleVolumeKey(key, fine: fine) }
             // Only own the keys while audio is actually under our control;
             // otherwise pass them to macOS so its native (crossed-out) HUD
             // gives an honest "this does nothing" signal. Both closures run
