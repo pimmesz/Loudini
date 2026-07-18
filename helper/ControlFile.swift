@@ -95,9 +95,12 @@ func readStatus() -> Status? {
 
 /// Lenient parse of the status.json `apps` array; unknown/missing keys default.
 private func parseApps(_ raw: Any?) -> [AppEntry] {
-    guard let rows = raw as? [[String: Any]] else { return [] }
-    return rows.map { r in
-        AppEntry(bundleID: r["bundleID"] as? String ?? "",
+    guard let rows = raw as? [Any] else { return [] }
+    // compactMap so a single malformed element drops only that row, not the
+    // entire roster — true lenient parse.
+    return rows.compactMap { row -> AppEntry? in
+        guard let r = row as? [String: Any] else { return nil }
+        return AppEntry(bundleID: r["bundleID"] as? String ?? "",
                  name: r["name"] as? String ?? "",
                  pid: (r["pid"] as? NSNumber)?.intValue ?? 0,
                  gain: clampGain((r["gain"] as? NSNumber)?.intValue ?? 100),

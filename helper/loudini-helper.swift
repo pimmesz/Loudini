@@ -438,13 +438,20 @@ final class AppRoster {
     private func resubscribeAndRefresh() {
         guard !isStopped else { return }
         let current = Set(procObjects())
+        // Keep already-subscribed processes that are still present; only mark a
+        // newly-seen process subscribed when its listener registration succeeds,
+        // so a failed add is retried on the next resubscribe tick instead of
+        // being silently treated as subscribed forever.
+        var nowSubscribed = subscribed.intersection(current)
         for obj in current.subtracting(subscribed) {
-            _ = AudioObjectAddPropertyListenerBlock(obj, &runningAddr, queue, runningListener)
+            if AudioObjectAddPropertyListenerBlock(obj, &runningAddr, queue, runningListener) == noErr {
+                nowSubscribed.insert(obj)
+            }
         }
         for obj in subscribed.subtracting(current) {
             _ = AudioObjectRemovePropertyListenerBlock(obj, &runningAddr, queue, runningListener)
         }
-        subscribed = current
+        subscribed = nowSubscribed
         refresh()
     }
 
@@ -762,9 +769,12 @@ final class Engine {
                                     device: currentDevice?.name ?? "", reason: lastReason,
                                     apps: currentApps) else { return }
         if lastStatusData == data { return }
-        lastStatusData = data
-        do { try atomicWrite(data, to: statusURL) }
-        catch { log("status write failed: \(error.localizedDescription)") }
+        // Only mark this state as published once the write actually lands — a
+        // transient write failure must not suppress the retry on the next tick.
+        do {
+            try atomicWrite(data, to: statusURL)
+            lastStatusData = data
+        } catch { log("status write failed: \(error.localizedDescription)") }
     }
 }
 
