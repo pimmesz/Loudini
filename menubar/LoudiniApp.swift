@@ -104,6 +104,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }()
 
+    /// Loudini's mark: four rounded level bars — a volume-control glyph that
+    /// reads at 16px, distinct from Apple's stock speaker. (x, height) on an
+    /// 18-pt box; each bar 2.4 wide, centred vertically.
+    private static let barSpecs: [(CGFloat, CGFloat)] = [(2.4, 5), (6.0, 11), (9.6, 8), (13.2, 4.5)]
+    private static func barPaths() -> NSBezierPath {
+        let p = NSBezierPath()
+        for (x, h) in barSpecs {
+            p.append(NSBezierPath(roundedRect: NSRect(x: x, y: (18 - h) / 2, width: 2.4, height: h),
+                                  xRadius: 1.1, yRadius: 1.1))
+        }
+        return p
+    }
+
+    /// Monochrome variant: a template image, so macOS paints it in the
+    /// menu-bar text colour (adapts to light/dark).
+    private static let levelBarsIcon: NSImage = {
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            NSColor.black.setFill(); barPaths().fill(); return true
+        }
+        img.isTemplate = true
+        return img
+    }()
+
+    /// Muted variant: the bars with a crossed-out slash (a knockout gap keeps
+    /// the slash legible over them). Monochrome template — mute reads the same
+    /// in both icon modes, and never as a jarring colour emoji.
+    private static let levelBarsMutedIcon: NSImage = {
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            NSColor.black.setFill(); barPaths().fill()
+            drawSlash(color: .black)
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }()
+
+    /// Loudini's pink→purple→cyan brand ramp, drawn horizontally so each bar
+    /// samples a slice of it.
+    private static let brandGradient = NSGradient(colors: [
+        NSColor(srgbRed: 1.00, green: 0.235, blue: 0.675, alpha: 1),   // #FF3CAC
+        NSColor(srgbRed: 0.525, green: 0.365, blue: 1.00, alpha: 1),   // #865DFF
+        NSColor(srgbRed: 0.125, green: 0.851, blue: 1.00, alpha: 1),   // #20D9FF
+    ])!
+    private static func drawSlash(color: NSColor) {
+        let slash = NSBezierPath()
+        slash.move(to: NSPoint(x: 3.2, y: 3.6)); slash.line(to: NSPoint(x: 14.8, y: 14.4))
+        slash.lineCapStyle = .round
+        NSGraphicsContext.current!.compositingOperation = .clear
+        slash.lineWidth = 4.4; slash.stroke()          // knock out a gap under the slash
+        NSGraphicsContext.current!.compositingOperation = .sourceOver
+        color.setStroke(); slash.lineWidth = 2.0; slash.stroke()
+    }
+
+    /// Full-colour variant: the gradient bars.
+    private static let levelBarsColorIcon: NSImage = {
+        NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            barPaths().addClip()
+            brandGradient.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18), angle: 0)
+            return true
+        }
+    }()
+
+    /// Muted colour variant: gradient bars crossed out (brand-purple slash), so
+    /// mute stays colour instead of dropping to monochrome when the icon is.
+    private static let levelBarsColorMutedIcon: NSImage = {
+        NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            let ctx = NSGraphicsContext.current!
+            ctx.saveGraphicsState()
+            barPaths().addClip()
+            brandGradient.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18), angle: 0)
+            ctx.restoreGraphicsState()
+            drawSlash(color: NSColor(srgbRed: 0.525, green: 0.365, blue: 1.0, alpha: 1))
+            return true
+        }
+    }()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.menu = buildMenu()
@@ -436,23 +512,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let healthy = lastStatusRunning && lastPipelineOK
         let keysDead = wantsKeyGrab && keyTap?.isRunning != true
         let badge = keysDead || (lastStatusRunning && !lastPipelineOK) ? " ⚠︎" : ""
-        if let logo = Self.menuBarLogo?.copy() as? NSImage {
-            // Brand logo + live level, so the menu bar still shows how loud
-            // Loudini is at a glance. In monochrome mode the logo renders as a
-            // template so macOS paints it in the menu-bar text colour, letting
-            // it blend in with other single-colour icons (and adapt to light/dark).
-            logo.isTemplate = wantsMonoIcon
-            button.image = logo
-            button.imagePosition = .imageLeft
-            button.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-            button.title = (lastShownMuted ? " 🔇" : " \(lastShownGain)%") + badge
-        } else {
-            let name = lastShownMuted ? "speaker.slash.fill" : speakerSymbolName(for: lastShownGain)
-            let image = NSImage(systemSymbolName: name, accessibilityDescription: "Loudini volume")
-            image?.isTemplate = true
-            button.image = image
-            button.title = badge
-        }
+        // The level-bars mark: crossed-out when muted, and colour or monochrome
+        // template to match the user's icon setting (so mute isn't the odd one
+        // out, and never a colour emoji).
+        button.image = wantsMonoIcon
+            ? (lastShownMuted ? Self.levelBarsMutedIcon : Self.levelBarsIcon)
+            : (lastShownMuted ? Self.levelBarsColorMutedIcon : Self.levelBarsColorIcon)
+        button.imagePosition = .imageLeft
+        button.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        button.title = " \(lastShownMuted ? "Muted" : "\(lastShownGain)%")" + badge
         button.appearsDisabled = !healthy
         if !lastStatusRunning {
             button.toolTip = "Loudini — daemon not running"

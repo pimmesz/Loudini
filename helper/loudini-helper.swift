@@ -745,6 +745,24 @@ final class Engine {
     private var aliveAddr = gaddr(kAudioDevicePropertyDeviceIsAlive)
     private var procListAddr = gaddr(kAudioHardwarePropertyProcessObjectList)
 
+    // Device-volume support (Touch Bar, and any app that sets the output level).
+    // When the output device owns a settable master volume (built-in speakers,
+    // most DACs), that scalar IS the master: the Touch Bar / keys / menu all
+    // drive it, and Loudini keeps its software gain at pass-through. A fixed-
+    // level device (Scarlett) has no scalar, so Loudini synthesises the volume
+    // in software as before. Fail-open safe: Loudini sets the scalar to the
+    // user's actual level (never pins it to 100%), so a crash leaves the device
+    // at the right volume, not full blast.
+    private var masterViaScalar = false
+    private var volumeAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyVolumeScalar,
+        mScope: kAudioObjectPropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain)
+    private var volumeListener: AudioObjectPropertyListenerBlock!
+    /// The scalar Loudini itself last wrote — lets the listener ignore its own
+    /// echo and react only to external changes (Touch Bar, another app).
+    private var lastAppliedScalar: Float = -1
+
     init(overrideUID: String?, meter: Bool) {
         self.overrideUID = overrideUID
         self.meterEnabled = meter
@@ -770,6 +788,7 @@ final class Engine {
                 guard let self else { return }
                 self.scheduleRebuild(reason: "output device sample rate / alive changed")
             }
+            volumeListener = { [weak self] _, _ in self?.onExternalVolume() }
             if overrideUID == nil {
                 _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
                                                         &defaultOutAddr, queue, systemListener)
@@ -817,8 +836,21 @@ final class Engine {
     func apply(control newControl: Control) {
         queue.async { [self] in
             guard !isShutdown, newControl != control else { return }
+            let gainChanged = newControl.gain != control.gain
             control = newControl
-            pipeline?.gain = newControl.multiplier
+            pipeline?.gain = softwareGain(newControl)
+            // On a device that owns its volume, the master IS the device scalar:
+            // drive it (echo-guarded) so the Touch Bar / Sound settings and
+            // Loudini stay one control. Never pins to 100% — sets the real level.
+            // Only on an actual master-gain change, so mute / per-app edits don't
+            // rewrite (and slightly re-round) the device level.
+            if masterViaScalar, gainChanged, let dev = currentDevice {
+                // If the set fails, resync our idea of the level to the device's
+                // actual value so control doesn't drift ahead of the hardware.
+                if !writeScalar(dev.id, Float(newControl.gain) / 100), let s = readScalar(dev.id) {
+                    control.gain = clampGain(Int((s * 100).rounded()))
+                }
+            }
             // Per-app: rebuild only if the tapped-process SET changed (a bundle
             // gained/lost an override, or its process set changed). A pure gain
             // change reuses the existing taps — a lock-free float store, no HAL
@@ -904,6 +936,51 @@ final class Engine {
         queue.asyncAfter(deadline: .now() + after, execute: work)
     }
 
+    // MARK: device-volume (scalar) plumbing — all on `queue`
+
+    /// Whether `dev` exposes a settable master output volume scalar.
+    private func deviceHasSettableVolume(_ dev: AudioObjectID) -> Bool {
+        var a = volumeAddr
+        guard AudioObjectHasProperty(dev, &a) else { return false }
+        var settable: DarwinBoolean = false
+        return AudioObjectIsPropertySettable(dev, &a, &settable) == 0 && settable.boolValue
+    }
+    private func readScalar(_ dev: AudioObjectID) -> Float? {
+        var a = volumeAddr; var v: Float32 = 0; var s = UInt32(MemoryLayout<Float32>.size)
+        return AudioObjectGetPropertyData(dev, &a, 0, nil, &s, &v) == 0 ? v : nil
+    }
+    @discardableResult
+    private func writeScalar(_ dev: AudioObjectID, _ value: Float) -> Bool {
+        var a = volumeAddr; var v = Float32(min(1, max(0, value)))
+        // Advance the echo guard only on success — a failed set leaves the
+        // device at its old level (a no-op volume change, never full blast).
+        guard AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v) == 0 else {
+            log("device volume set failed (scalar \(v)) — level unchanged this cycle")
+            return false
+        }
+        lastAppliedScalar = v
+        return true
+    }
+    /// Software master gain fed to the pipeline: pass-through (mute still
+    /// honoured) when the device owns the volume, else the full multiplier.
+    private func softwareGain(_ c: Control) -> Float {
+        masterViaScalar ? (c.muted ? 0 : 1) : c.multiplier
+    }
+    /// An external device-volume change (the Touch Bar, another app): mirror it
+    /// into control.json so every frontend and our own pipeline follow. The
+    /// 100 ms control watcher then re-applies it through the normal path.
+    private func onExternalVolume() {
+        guard !isShutdown, masterViaScalar, let dev = currentDevice,
+              let s = readScalar(dev.id) else { return }
+        if abs(s - lastAppliedScalar) < 0.004 { return }   // our own echo, ignore
+        let g = clampGain(Int((s * 100).rounded()))
+        guard g != control.gain else { return }
+        lastAppliedScalar = s   // pre-claim so the resulting write→apply→writeScalar echo is ignored
+        var c = control; c.gain = g
+        try? writeControl(c)
+        log("device volume changed externally (e.g. Touch Bar) -> gain=\(g)")
+    }
+
     private func rebuildLocked(reason: String) {
         guard !isShutdown else { return }
         removeDeviceListeners()
@@ -941,6 +1018,11 @@ final class Engine {
             return
         }
 
+        // Does this output own its volume? Both capability AND a successful read
+        // are required — otherwise fall back to software gain as master (safe).
+        // The device level is adopted AFTER the listener is live (below).
+        masterViaScalar = deviceHasSettableVolume(dev.id) && readScalar(dev.id) != nil
+
         let desired = desiredAppTaps()
         let specs = desired.map { AppTapSpec(bundleID: $0.bundleID, procs: $0.procs,
                                              gain: control.apps[$0.bundleID]?.multiplier ?? 1) }
@@ -953,7 +1035,7 @@ final class Engine {
         // destroy explicitly before rethrowing.
         func buildAndStart(_ specs: [AppTapSpec]) throws -> Pipeline {
             let p = try Pipeline(excludeProcs: [selfProc], appTaps: specs, outUID: dev.uid,
-                                 gain: control.multiplier, meter: meterEnabled)
+                                 gain: softwareGain(control), meter: meterEnabled)
             do {
                 try p.start()
             } catch {
@@ -990,6 +1072,19 @@ final class Engine {
             builtBundleIndex = Dictionary(uniqueKeysWithValues:
                 p.bundleIDsInOrder.enumerated().map { ($1, $0) })
             addDeviceListeners(dev.id)
+            // Listener is now live: adopt the device's current level so a rebuild
+            // never jumps it, and any change from here on fires onExternalVolume.
+            // If the read fails now (it succeeded during detection), don't trust a
+            // stale gain — fall back to software gain as master (safe, no jump).
+            if masterViaScalar {
+                if let s = readScalar(dev.id) {
+                    control.gain = clampGain(Int((s * 100).rounded()))
+                    lastAppliedScalar = s
+                } else {
+                    masterViaScalar = false
+                    p.gain = softwareGain(control)
+                }
+            }
             let appNote = p.bundleIDsInOrder.isEmpty
                 ? "no per-app taps"
                 : "per-app taps: \(p.bundleIDsInOrder.joined(separator: ", "))"
@@ -997,6 +1092,9 @@ final class Engine {
             let droppedNote = dropped > 0 ? " (\(dropped) fell open to master path)" : ""
             log("pipeline live (\(reason)): global tap [excl. pid \(getpid())] -> master \(control.multiplier) -> \(dev.name) [\(dev.uid)]; \(appNote)\(droppedNote)")
             scheduleShapeLog(for: p)
+            // If we adopted the device's own volume, sync control.json so every
+            // frontend shows that level (our watcher re-applying it is a no-op).
+            if masterViaScalar { try? writeControl(control) }
             publishStatus()
         } catch {
             log("rebuild(\(reason)) failed: \(error.localizedDescription) — audio untouched (fail-open), retrying in 2s")
@@ -1025,12 +1123,18 @@ final class Engine {
         deviceListenerTarget = dev
         _ = AudioObjectAddPropertyListenerBlock(dev, &rateAddr, queue, deviceListener)
         _ = AudioObjectAddPropertyListenerBlock(dev, &aliveAddr, queue, deviceListener)
+        if masterViaScalar {
+            let st = AudioObjectAddPropertyListenerBlock(dev, &volumeAddr, queue, volumeListener)
+            if st != 0 { log("volume listener registration failed (\(fourCC(st))) — external volume changes won't mirror") }
+        }
     }
 
     private func removeDeviceListeners() {
         guard deviceListenerTarget != kAudioObjectUnknown else { return }
         _ = AudioObjectRemovePropertyListenerBlock(deviceListenerTarget, &rateAddr, queue, deviceListener)
         _ = AudioObjectRemovePropertyListenerBlock(deviceListenerTarget, &aliveAddr, queue, deviceListener)
+        // Harmless if it was never added (non-scalar device); we always clear it.
+        _ = AudioObjectRemovePropertyListenerBlock(deviceListenerTarget, &volumeAddr, queue, volumeListener)
         deviceListenerTarget = AudioObjectID(kAudioObjectUnknown)
     }
 

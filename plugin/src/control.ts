@@ -38,12 +38,25 @@ let writeSeq = 0;
 
 export function writeControl(c: Control): void {
   mkdirSync(DIR, { recursive: true });
+  // Preserve keys this frontend doesn't own — notably the per-app `apps`
+  // overrides the menu-bar app writes. Without this merge, any deck volume
+  // press would wipe every per-app override. We touch only gain/muted.
+  let base: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(CONTROL, 'utf8'));
+    // Only merge a real object — an array or scalar would spread junk keys.
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      base = parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* no file yet or malformed — start from empty, same as before */
+  }
   // Atomic write: unique temp file in the same dir, then rename(2). Several
   // frontends write this file concurrently and the daemon reads it every
   // 100 ms — a reader must never see a half-written file.
   const tmp = join(DIR, `.control.json.${process.pid}.${writeSeq++}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify({ gain: clamp(c.gain), muted: c.muted }));
+    writeFileSync(tmp, JSON.stringify({ ...base, gain: clamp(c.gain), muted: c.muted }));
     renameSync(tmp, CONTROL);
   } catch (err) {
     rmSync(tmp, { force: true }); // don't leave temp files behind on failure
