@@ -1174,14 +1174,18 @@ enum LoudiniHelper {
     private static func resolveAppTarget(_ token: String, _ roster: [AppEntry]) -> String? {
         if !token.isEmpty, roster.contains(where: { $0.bundleID == token }) { return token }
         let lower = token.lowercased()
-        if let hit = roster.first(where: { $0.name.lowercased() == lower && !$0.bundleID.isEmpty }) {
+        // Every fuzzy pass skips bundle-less sources *inside* the predicate so it
+        // keeps scanning to a later addressable match instead of stopping on the
+        // first name/id hit and then failing the guard.
+        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.name.lowercased() == lower }) {
             return hit.bundleID
         }
-        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.bundleID.lowercased() == lower }) {
+        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.name.lowercased().contains(lower) }) {
             return hit.bundleID
         }
-        if let hit = roster.first(where: { $0.name.lowercased().contains(lower) }),
-           !hit.bundleID.isEmpty { return hit.bundleID }
+        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.bundleID.lowercased().contains(lower) }) {
+            return hit.bundleID
+        }
         return token.contains(".") ? token : nil
     }
 

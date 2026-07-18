@@ -486,10 +486,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: per-app rows (Phase 3)
 
-    /// A stable per-row key: bundle id when present, else a pid-scoped key so
-    /// bundle-less sources (CLI/helper audio) don't collide on "".
+    /// A per-row key that's unique across the roster. Scoping by pid keeps two
+    /// entries that share a bundle id (or share the empty "" of bundle-less
+    /// sources) from colliding in `appRows` — a collision would overwrite one
+    /// row's handle and orphan its menu item on the next update/removal.
     private static func rowKey(_ a: AppEntry) -> String {
-        a.bundleID.isEmpty ? "pid:\(a.pid)" : a.bundleID
+        a.bundleID.isEmpty ? "pid:\(a.pid)" : "\(a.bundleID)#\(a.pid)"
     }
 
     /// Reconcile the per-app rows with the daemon's roster. Reuses existing row
