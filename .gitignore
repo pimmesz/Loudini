@@ -3,3 +3,8 @@
 helper/loudini-helper
 menubar/Loudini.app/
 menubar/AppIcon.iconset/
+
+# pnpm project — npm lockfiles must never be committed
+package-lock.json
+yarn.lock
+node_modules/
