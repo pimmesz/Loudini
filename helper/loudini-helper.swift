@@ -944,17 +944,41 @@ final class Engine {
         let desired = desiredAppTaps()
         let specs = desired.map { AppTapSpec(bundleID: $0.bundleID, procs: $0.procs,
                                              gain: control.apps[$0.bundleID]?.multiplier ?? 1) }
-        do {
+
+        // Build the pipeline and start its IOProc, cleaning up on any failure.
+        // `start()` (AudioDeviceStart) is NOT covered by Pipeline's internal
+        // fail-open — only tap/aggregate/IOProc *creation* is. Without a start
+        // failure orphaning the live tap+aggregate inside coreaudiod on every
+        // retry (the daemon stays alive, so die-time cleanup never happens),
+        // destroy explicitly before rethrowing.
+        func buildAndStart(_ specs: [AppTapSpec]) throws -> Pipeline {
             let p = try Pipeline(excludeProcs: [selfProc], appTaps: specs, outUID: dev.uid,
                                  gain: control.multiplier, meter: meterEnabled)
             do {
                 try p.start()
             } catch {
-                // Without this, a start failure orphans the live tap+aggregate
-                // inside coreaudiod on every retry (the daemon stays alive, so
-                // die-time cleanup never happens).
                 p.destroy()
                 throw error
+            }
+            return p
+        }
+
+        do {
+            let p: Pipeline
+            do {
+                p = try buildAndStart(specs)
+            } catch {
+                // A per-app pipeline that built but wouldn't START: fall open to
+                // global-only NOW rather than tearing down and retrying the SAME
+                // per-app config on the retry loop — otherwise one problematic app
+                // tap keeps the entire master pipeline unavailable. This mirrors
+                // Pipeline.init's fail-open for the aggregate/IOProc build. If
+                // there were no per-app taps to drop, there is nothing to fall
+                // open to, so rethrow into the retry loop (audio stays direct).
+                guard !specs.isEmpty else { throw error }
+                log("per-app pipeline failed to start: \(error.localizedDescription) — "
+                    + "dropping all per-app taps to the master path and rebuilding global-only (fail-open)")
+                p = try buildAndStart([])
             }
             pipeline = p
             currentDevice = dev
