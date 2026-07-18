@@ -41,6 +41,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var monoIconItem: NSMenuItem!
     private var brightnessItem: NSMenuItem!
 
+    // Per-app volume section (Phase 3). One row per status.json.apps entry, built
+    // dynamically between `appsSeparator` and `resetAppsItem`.
+    private var appsSeparator: NSMenuItem!
+    private var emptyAppsItem: NSMenuItem!
+    private var resetAppsItem: NSMenuItem!
+    /// Live row views keyed by roster row key (bundle id, or a pid-scoped key for
+    /// bundle-less sources). Reused across renders so a drag survives a gain echo.
+    private var appRows: [String: AppRowViews] = [:]
+    /// The ordered row keys currently shown — a cheap structural-change check.
+    private var shownAppKeys: [String] = []
+
+    private struct AppRowViews {
+        let item: NSMenuItem
+        let icon: NSImageView
+        let name: NSTextField
+        let slider: NSSlider
+        let mute: NSButton
+    }
+
     /// When on, the menu-bar logo renders as a template (single colour that
     /// follows the menu-bar text), so it blends in with other monochrome icons.
     private var wantsMonoIcon = UserDefaults.standard.bool(forKey: "monoIcon")
@@ -226,6 +245,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                      accessibilityDescription: "warning")
         menu.addItem(conflictItem)
 
+        // Per-app volume section. Rows are inserted at runtime (renderApps)
+        // between this separator and the reset item; the empty-state line shows
+        // when nothing is playing, matching macOS's own Sound per-app list.
+        appsSeparator = .separator()
+        menu.addItem(appsSeparator)
+        emptyAppsItem = NSMenuItem(title: "No apps are playing audio", action: nil, keyEquivalent: "")
+        emptyAppsItem.isEnabled = false
+        menu.addItem(emptyAppsItem)
+        resetAppsItem = NSMenuItem(title: "Reset App Volumes",
+                                   action: #selector(resetAppsClicked), keyEquivalent: "")
+        resetAppsItem.target = self
+        resetAppsItem.image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: nil)
+        resetAppsItem.isHidden = true
+        menu.addItem(resetAppsItem)
+
         menu.addItem(.separator())
 
         grabKeysItem = NSMenuItem(title: "Grab Volume Keys",
@@ -367,6 +401,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             deviceItem.toolTip = nil
         }
 
+        // Per-app rows reflect the daemon's roster; the reset affordance appears
+        // whenever any override exists in control.json (even for a silent app).
+        renderApps(running ? status!.apps : [], hasOverrides: !control.apps.isEmpty)
+
         guard running else {
             lastLevel = nil
             return
@@ -433,6 +471,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func muteClicked() {
         writeControlChange { try ControlOps.toggleMute() }
+    }
+
+    // MARK: per-app rows (Phase 3)
+
+    /// A stable per-row key: bundle id when present, else a pid-scoped key so
+    /// bundle-less sources (CLI/helper audio) don't collide on "".
+    private static func rowKey(_ a: AppEntry) -> String {
+        a.bundleID.isEmpty ? "pid:\(a.pid)" : a.bundleID
+    }
+
+    /// Reconcile the per-app rows with the daemon's roster. Reuses existing row
+    /// views when the set of apps is unchanged (only refreshing values, so a
+    /// live drag isn't interrupted by a gain echo) and rebuilds only when apps
+    /// actually appear/disappear.
+    private func renderApps(_ apps: [AppEntry], hasOverrides: Bool) {
+        guard let menu = statusItem.menu else { return }
+        emptyAppsItem.isHidden = !apps.isEmpty
+        // Only offer the reset when there's actually an override to clear.
+        resetAppsItem.isHidden = !hasOverrides
+
+        let keys = apps.map(Self.rowKey)
+        if keys == shownAppKeys {
+            for a in apps { updateAppRow(appRows[Self.rowKey(a)], a) }
+            return
+        }
+        // Structure changed — tear the old rows out and rebuild in roster order,
+        // inserting just above the reset item.
+        for row in appRows.values { menu.removeItem(row.item) }
+        appRows.removeAll()
+        var idx = menu.index(of: resetAppsItem)
+        for a in apps {
+            let row = makeAppRow(a)
+            if idx >= 0 { menu.insertItem(row.item, at: idx); idx += 1 }
+            appRows[Self.rowKey(a)] = row
+            updateAppRow(row, a)
+        }
+        shownAppKeys = keys
+    }
+
+    private func makeAppRow(_ a: AppEntry) -> AppRowViews {
+        let item = NSMenuItem()
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 42))
+
+        let icon = NSImageView(frame: NSRect(x: 16, y: 21, width: 18, height: 18))
+        icon.imageScaling = .scaleProportionallyUpOrDown
+
+        let name = NSTextField(labelWithString: a.name)
+        name.font = .systemFont(ofSize: 12)
+        name.lineBreakMode = .byTruncatingTail
+        name.frame = NSRect(x: 40, y: 23, width: 196, height: 15)
+
+        let mute = NSButton(frame: NSRect(x: 244, y: 20, width: 22, height: 22))
+        mute.isBordered = false
+        mute.bezelStyle = .regularSquare
+        mute.imagePosition = .imageOnly
+        mute.target = self
+        mute.action = #selector(appMuteClicked(_:))
+
+        let slider = NSSlider(value: Double(a.gain), minValue: 0, maxValue: 100,
+                              target: self, action: #selector(appSliderMoved(_:)))
+        slider.isContinuous = true
+        slider.frame = NSRect(x: 40, y: 2, width: 226, height: 20)
+
+        // Bundle id rides on the controls so the action knows which app to write.
+        // Bundle-less sources can't be targeted (no stable key) — disable them.
+        let addressable = !a.bundleID.isEmpty
+        slider.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
+        mute.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
+        slider.isEnabled = addressable
+        mute.isEnabled = addressable
+        if !addressable {
+            let tip = "No bundle id — per-app volume can't target this source"
+            slider.toolTip = tip
+            mute.toolTip = tip
+        }
+
+        row.addSubview(icon)
+        row.addSubview(name)
+        row.addSubview(mute)
+        row.addSubview(slider)
+        item.view = row
+        return AppRowViews(item: item, icon: icon, name: name, slider: slider, mute: mute)
+    }
+
+    private func updateAppRow(_ row: AppRowViews?, _ a: AppEntry) {
+        guard let row else { return }
+        row.name.stringValue = a.name
+        // Dim a lingering (idle) app so the live ones read first.
+        row.name.textColor = a.active ? .labelColor : .secondaryLabelColor
+        row.icon.image = NSRunningApplication(processIdentifier: pid_t(a.pid))?.icon
+            ?? NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil)
+        // Don't fight the user's hand: skip the echo while this slider is dragged.
+        if !(row.slider.cell?.isHighlighted ?? false) { row.slider.doubleValue = Double(a.gain) }
+        row.mute.image = NSImage(
+            systemSymbolName: a.muted ? "speaker.slash.fill" : "speaker.fill",
+            accessibilityDescription: a.muted ? "Unmute \(a.name)" : "Mute \(a.name)")
+        row.mute.contentTintColor = a.muted ? .systemRed : .secondaryLabelColor
+    }
+
+    @objc private func appSliderMoved(_ sender: NSSlider) {
+        guard let bid = sender.identifier?.rawValue, !bid.isEmpty else { return }
+        let gain = Int(sender.doubleValue.rounded())
+        writeControlChange { try ControlOps.setApp(bid, gain: gain) }
+    }
+
+    @objc private func appMuteClicked(_ sender: NSButton) {
+        guard let bid = sender.identifier?.rawValue, !bid.isEmpty else { return }
+        writeControlChange { try ControlOps.toggleAppMute(bid) }
+    }
+
+    @objc private func resetAppsClicked() {
+        writeControlChange { try ControlOps.resetApps() }
     }
 
     private func handleVolumeKey(_ key: VolumeKeyTap.Key, fine: Bool) {

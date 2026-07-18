@@ -1122,6 +1122,9 @@ usage: loudini-helper [--device <UID>]   run the gain daemon (default: current o
        loudini-helper set <0-100>        set gain
        loudini-helper get                print current level (status.json if present)
        loudini-helper apps               list apps currently producing audio (from status.json)
+       loudini-helper apps reset         reset every per-app volume to 100% (clears overrides)
+       loudini-helper app <id|name> set <0-100> | mute | get
+                                         set/toggle/read one app's volume (bundle id exact, name fuzzy)
        loudini-helper doctor             diagnose the whole setup, with fixes
        loudini-helper brightness up|down [step] | set <0-100> | get
                                          external-monitor brightness over DDC (no permission needed)
@@ -1144,7 +1147,7 @@ enum LoudiniHelper {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         switch args.first {
-        case "up", "down", "mute", "set", "get", "apps":
+        case "up", "down", "mute", "set", "get", "apps", "app":
             runCLI(args)
         case "doctor":
             runDoctor()
@@ -1158,6 +1161,22 @@ enum LoudiniHelper {
     // MARK: CLI subcommands — read/modify/atomic-write control.json, then exit.
     // They never touch Core Audio; the running daemon applies the change on
     // its next 100 ms poll.
+
+    /// Resolve a user-typed `app` target to a bundle id. Bundle id is exact
+    /// (and usable even when the app isn't in the roster — you can pre-set a
+    /// silent app); a name is matched case-insensitively over the live roster
+    /// (exact name, then substring, then bundle-id substring). Falls back to
+    /// treating a dotted token as a bundle id so a not-yet-playing app is still
+    /// addressable. nil when nothing plausibly matches.
+    private static func resolveAppTarget(_ token: String, _ roster: [AppEntry]) -> String? {
+        if roster.contains(where: { $0.bundleID == token }) { return token }
+        let lower = token.lowercased()
+        if let hit = roster.first(where: { $0.name.lowercased() == lower }) { return hit.bundleID }
+        if let hit = roster.first(where: { $0.bundleID.lowercased() == lower }) { return hit.bundleID }
+        if let hit = roster.first(where: { $0.name.lowercased().contains(lower) }),
+           !hit.bundleID.isEmpty { return hit.bundleID }
+        return token.contains(".") ? token : nil
+    }
 
     private static func runCLI(_ args: [String]) -> Never {
         do {
@@ -1188,8 +1207,13 @@ enum LoudiniHelper {
                     print("gain=\(c.gain) muted=\(c.muted) running=false pipeline=false device=\"\"")
                 }
             case "apps":
-                // Read-only: print the daemon's published roster of apps that are
-                // currently producing audio (status.json). Never touches Core Audio.
+                // `apps reset` clears every override; bare `apps` is a read-only
+                // dump of the daemon's roster (status.json). Never touches Core Audio.
+                if args.count == 2, args[1] == "reset" {
+                    try ControlOps.resetApps()
+                    print("reset all per-app volumes to 100%")
+                    break
+                }
                 guard args.count == 1 else { usage() }
                 let apps = readStatus()?.apps ?? []
                 if apps.isEmpty {
@@ -1200,6 +1224,38 @@ enum LoudiniHelper {
                         let idle = a.active ? "" : "  (idle)"
                         print("\(id)\t\(a.name)\tgain=\(a.gain)\tmuted=\(a.muted)\(idle)")
                     }
+                }
+            case "app":
+                // app <bundleID|name> set <0-100> | mute | get. Bundle id is exact
+                // (settable even while the app is silent); name is a fuzzy,
+                // case-insensitive convenience over the live roster.
+                guard args.count >= 3 else { usage() }
+                let roster = readStatus()?.apps ?? []
+                guard let bid = resolveAppTarget(args[1], roster) else {
+                    FileHandle.standardError.write(
+                        Data("error: no app matches \"\(args[1])\" — try `loudini apps`\n".utf8))
+                    exit(1)
+                }
+                switch args[2] {
+                case "set":
+                    guard args.count == 4, let g = Int(args[3]), (0...100).contains(g) else { usage() }
+                    try ControlOps.setApp(bid, gain: g)
+                    print("\(bid) gain=\(g)")
+                case "mute":
+                    guard args.count == 3 else { usage() }
+                    let c = try ControlOps.toggleAppMute(bid)
+                    print("\(bid) muted=\(c.apps[bid]?.muted ?? false)")
+                case "get":
+                    guard args.count == 3 else { usage() }
+                    // Prefer the daemon's applied values (what's actually audible);
+                    // fall back to the pending override in control.json, then default.
+                    let applied = roster.first { $0.bundleID == bid }
+                    let pending = ControlOps.current().apps[bid]
+                    let gain = applied?.gain ?? pending?.gain ?? 100
+                    let muted = applied?.muted ?? pending?.muted ?? false
+                    print("bundleID=\(bid) gain=\(gain) muted=\(muted)")
+                default:
+                    usage()
                 }
             default:
                 usage()

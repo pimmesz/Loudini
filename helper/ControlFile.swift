@@ -207,4 +207,41 @@ enum ControlOps {
         try writeControl(c)
         return c
     }
+
+    // MARK: per-app overrides (Phase 3) — read-modify-write control.json's `apps`
+    // map, keyed by bundle id. Shared by the menu-bar rows and the `loudini app`
+    // CLI so both write the exact same shape. An empty bundle id is a no-op
+    // (readControl ignores empty keys — there's nothing stable to target).
+
+    @discardableResult
+    static func setApp(_ bundleID: String, gain: Int) throws -> Control {
+        var c = current()
+        guard !bundleID.isEmpty else { return c }
+        var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
+        o.gain = clampGain(gain)
+        c.apps[bundleID] = o
+        try writeControl(c)
+        return c
+    }
+
+    @discardableResult
+    static func toggleAppMute(_ bundleID: String) throws -> Control {
+        var c = current()
+        guard !bundleID.isEmpty else { return c }
+        var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
+        o.muted.toggle()
+        c.apps[bundleID] = o
+        try writeControl(c)
+        return c
+    }
+
+    /// "Reset all apps to 100%" — clears the whole `apps` map so every app rides
+    /// master only again. Master gain/mute are untouched.
+    @discardableResult
+    static func resetApps() throws -> Control {
+        var c = current()
+        c.apps = [:]
+        try writeControl(c)
+        return c
+    }
 }

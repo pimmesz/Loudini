@@ -135,7 +135,9 @@ Two JSON files in `~/.config/loudini/` are the whole API:
     pipeline is down (omitted when it's up).
   - `apps` — the live roster of apps currently producing audio (read-only):
     `[{bundleID,name,pid,gain,muted,active}]`. Populated from
-    `kAudioProcessPropertyIsRunningOutput`; `loudini apps` prints it. See `SPEC-per-app-volume.md`.
+    `kAudioProcessPropertyIsRunningOutput`; `loudini apps` prints it. Set one app with
+    `loudini app <id|name> set <0-100>|mute`, clear all with `loudini apps reset`, or use the
+    per-app rows under the master slider in the menu-bar app. See `SPEC-per-app-volume.md`.
 
 ## Troubleshooting
 
