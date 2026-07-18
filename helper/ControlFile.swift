@@ -24,6 +24,18 @@ struct Control: Equatable {
     var multiplier: Float { muted ? 0 : Float(gain) / 100 }
 }
 
+/// One row of the live "producing audio" roster the daemon publishes in
+/// status.json (Phase 1 of the per-app-volume feature). Read-only for frontends:
+/// they render straight from this array without their own Core Audio access.
+struct AppEntry: Equatable {
+    var bundleID: String   // stable id, "" for sources without a bundle (CLI/helper audio)
+    var name: String       // localizedName, or a bundle-id / process-name fallback
+    var pid: Int           // a representative live pid for the app
+    var gain: Int          // applied per-app override, 0-100 (Phase 1: always 100)
+    var muted: Bool        // applied per-app mute (Phase 1: always false)
+    var active: Bool       // IsRunningOutput now (false = lingering in the grace window)
+}
+
 struct Status: Equatable {
     var gain: Int
     var muted: Bool
@@ -35,6 +47,10 @@ struct Status: Equatable {
     var device: String
     /// Additive: why the pipeline is down — "" (up), "no-device", or error text.
     var reason: String
+    /// Additive: the live roster of apps currently producing audio (or lingering
+    /// in the anti-flicker grace window). Empty when nothing is playing or the
+    /// daemon is gone.
+    var apps: [AppEntry]
 }
 
 /// Lenient parse: malformed file or missing keys keep the previous values.
@@ -58,17 +74,42 @@ func readStatus() -> Status? {
     var running = obj["running"] as? Bool ?? false
     // Old files predate "pipeline"; assume it followed running to avoid false alarms.
     var pipeline = obj["pipeline"] as? Bool ?? running
+    var deadDaemon = false
     if running, let pid = (obj["pid"] as? NSNumber)?.int32Value, pid > 0,
        kill(pid, 0) == -1, errno == ESRCH {
         running = false
         pipeline = false
+        deadDaemon = true
     }
+    // A provably-dead daemon can't have a live roster — drop it rather than show
+    // a stale "what's playing" list from a status file nobody is updating.
+    let apps = deadDaemon ? [] : parseApps(obj["apps"])
     return Status(gain: clampGain((obj["gain"] as? NSNumber)?.intValue ?? 100),
                   muted: obj["muted"] as? Bool ?? false,
                   running: running,
                   pipeline: pipeline,
                   device: obj["device"] as? String ?? "",
-                  reason: obj["reason"] as? String ?? "")
+                  reason: obj["reason"] as? String ?? "",
+                  apps: apps)
+}
+
+/// Lenient parse of the status.json `apps` array; unknown/missing keys default.
+private func parseApps(_ raw: Any?) -> [AppEntry] {
+    guard let rows = raw as? [[String: Any]] else { return [] }
+    return rows.map { r in
+        AppEntry(bundleID: r["bundleID"] as? String ?? "",
+                 name: r["name"] as? String ?? "",
+                 pid: (r["pid"] as? NSNumber)?.intValue ?? 0,
+                 gain: clampGain((r["gain"] as? NSNumber)?.intValue ?? 100),
+                 muted: r["muted"] as? Bool ?? false,
+                 active: r["active"] as? Bool ?? true)
+    }
+}
+
+/// Serialize a roster entry to the status.json shape (daemon-side).
+func appEntryJSON(_ a: AppEntry) -> [String: Any] {
+    ["bundleID": a.bundleID, "name": a.name, "pid": a.pid,
+     "gain": clampGain(a.gain), "muted": a.muted, "active": a.active]
 }
 
 /// Atomic write: unique temp file in the same directory (thus same filesystem), then rename(2),

@@ -7,17 +7,19 @@
 //
 // Control:  ~/.config/loudini/control.json   {"gain": <int 0-100>, "muted": <bool>}
 //           polled every 100ms; effective multiplier = muted ? 0 : gain/100.
-// Status:   ~/.config/loudini/status.json    {"gain","muted","running","device"}
+// Status:   ~/.config/loudini/status.json    {"gain","muted","running","device","apps"}
 //           written atomically at startup, on every change, and on shutdown
-//           (running:false).
+//           (running:false). "apps" is the live roster of processes producing
+//           audio right now (kAudioProcessPropertyIsRunningOutput) — read-only.
 //
 // Fail-open: if this process dies for any reason, coreaudiod destroys the tap +
 // aggregate (they are private objects owned by this HAL client) and audio
 // returns to the normal direct path.
 //
 // Build:  swiftc -O -parse-as-library -o loudini-helper \
-//           loudini-helper.swift ControlFile.swift \
-//           -framework CoreAudio -framework AudioToolbox -framework Foundation
+//           loudini-helper.swift ControlFile.swift DDC.swift \
+//           -framework CoreAudio -framework AudioToolbox -framework Foundation \
+//           -framework AppKit -framework IOKit
 // Usage:  loudini-helper [--device <UID>]                          (daemon)
 //         loudini-helper up|down [step] | mute | set <0-100> | get (CLI — writes control.json
 //                                                                  and exits; never touches
@@ -27,6 +29,8 @@
 import Foundation
 import CoreAudio
 import AudioToolbox
+import AppKit   // NSRunningApplication — resolve pid -> localized app name for the roster
+import Darwin   // proc_name — name fallback for audio sources without a bundle
 
 // MARK: - logging
 
@@ -111,11 +115,22 @@ func processObject(forPID pid: pid_t) -> AudioObjectID? {
 
 // MARK: - status file (the shared control/status contract lives in ControlFile.swift)
 
-func writeStatus(_ c: Control, running: Bool, pipeline: Bool, device: String, reason: String) {
+/// Serialize the status contract, including the Phase 1 `apps` roster (always
+/// present, empty when nothing is playing). Byte-stable via sortedKeys so the
+/// publisher can dedup identical states with a plain Data compare.
+func statusData(_ c: Control, running: Bool, pipeline: Bool, device: String,
+                reason: String, apps: [AppEntry]) -> Data? {
     var obj: [String: Any] = ["gain": c.gain, "muted": c.muted, "running": running,
                               "pipeline": pipeline, "device": device, "pid": Int(getpid())]
     if !reason.isEmpty { obj["reason"] = reason }
-    guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
+    obj["apps"] = apps.map(appEntryJSON)
+    return try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+}
+
+func writeStatus(_ c: Control, running: Bool, pipeline: Bool, device: String,
+                 reason: String, apps: [AppEntry]) {
+    guard let data = statusData(c, running: running, pipeline: pipeline,
+                                device: device, reason: reason, apps: apps) else { return }
     do { try atomicWrite(data, to: statusURL) }
     catch { log("status write failed: \(error.localizedDescription)") }
 }
@@ -319,6 +334,203 @@ final class Pipeline {
     }
 }
 
+// MARK: - live "producing audio" roster (Phase 1: read-only, published to status.json)
+
+/// Watches Core Audio's process objects and maintains the short list of apps
+/// that are actually rendering output right now — the whole point of the
+/// per-app feature is showing *only* what's making sound, not every dormant
+/// audio client. The signal is `kAudioProcessPropertyIsRunningOutput`; identity
+/// comes from `kAudioProcessPropertyPID` + `kAudioProcessPropertyBundleID`.
+///
+/// Push-updated, not polled: a listener on the process-object list catches apps
+/// appearing/disappearing, and a per-process listener on IsRunningOutput catches
+/// start/stop. A short linger window keeps a row for a few seconds after audio
+/// stops so a paused track or inter-song gap doesn't make it flicker; a 1 s
+/// timer expires the lingering rows. Publishes an [AppEntry] snapshot on change.
+///
+/// Phase 1 is read-only — per-app gain/muted are always 100/false here; the
+/// render path is untouched. Runs entirely on its own serial queue.
+final class AppRoster {
+    /// Grace window: how long a row survives after IsRunningOutput goes false,
+    /// so pauses and gaps between tracks don't drop and re-add it. Tunable.
+    private static let lingerWindow: TimeInterval = 5.0
+
+    private final class Entry {
+        let bundleID: String
+        var name: String
+        var pid: pid_t
+        var active: Bool
+        var lastActive: Date
+        init(bundleID: String, name: String, pid: pid_t, active: Bool, lastActive: Date) {
+            self.bundleID = bundleID; self.name = name; self.pid = pid
+            self.active = active; self.lastActive = lastActive
+        }
+    }
+
+    private let queue = DispatchQueue(label: "gg.pim.loudini.roster")
+    private let excludePIDs: Set<pid_t>
+    private let excludeBundleIDs: Set<String>
+    private let onChange: ([AppEntry]) -> Void
+
+    /// Keyed by identity: bundle id, or "pid:<pid>" for sources without a bundle.
+    private var entries: [String: Entry] = [:]
+    private var published: [AppEntry] = []
+    private var isStopped = false
+
+    /// Process objects we hold an IsRunningOutput listener on (kept in sync with
+    /// the live process list so we add/remove symmetrically).
+    private var subscribed: Set<AudioObjectID> = []
+    private var listAddr = gaddr(kAudioHardwarePropertyProcessObjectList)
+    private var runningAddr = gaddr(kAudioProcessPropertyIsRunningOutput)
+    private var listListener: AudioObjectPropertyListenerBlock!
+    private var runningListener: AudioObjectPropertyListenerBlock!
+    private var lingerTimer: DispatchSourceTimer?
+
+    init(excludePIDs: Set<pid_t>, excludeBundleIDs: Set<String>,
+         onChange: @escaping ([AppEntry]) -> Void) {
+        self.excludePIDs = excludePIDs
+        self.excludeBundleIDs = excludeBundleIDs
+        self.onChange = onChange
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            self.runningListener = { [weak self] _, _ in
+                self?.queue.async { self?.refresh() }
+            }
+            self.listListener = { [weak self] _, _ in
+                self?.queue.async { self?.resubscribeAndRefresh() }
+            }
+            _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                    &self.listAddr, self.queue, self.listListener)
+            self.resubscribeAndRefresh()
+
+            let t = DispatchSource.makeTimerSource(queue: self.queue)
+            t.schedule(deadline: .now() + 1, repeating: 1)
+            t.setEventHandler { [weak self] in self?.pruneExpired() }
+            t.resume()
+            self.lingerTimer = t
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            isStopped = true
+            lingerTimer?.cancel(); lingerTimer = nil
+            if listListener != nil {
+                _ = AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                           &listAddr, queue, listListener)
+            }
+            for obj in subscribed {
+                _ = AudioObjectRemovePropertyListenerBlock(obj, &runningAddr, queue, runningListener)
+            }
+            subscribed.removeAll()
+        }
+    }
+
+    // MARK: internals (all on `queue`)
+
+    private func procObjects() -> [AudioObjectID] {
+        getIDs(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList)
+    }
+
+    private func resubscribeAndRefresh() {
+        guard !isStopped else { return }
+        let current = Set(procObjects())
+        for obj in current.subtracting(subscribed) {
+            _ = AudioObjectAddPropertyListenerBlock(obj, &runningAddr, queue, runningListener)
+        }
+        for obj in subscribed.subtracting(current) {
+            _ = AudioObjectRemovePropertyListenerBlock(obj, &runningAddr, queue, runningListener)
+        }
+        subscribed = current
+        refresh()
+    }
+
+    private func pid(of obj: AudioObjectID) -> pid_t? {
+        var a = gaddr(kAudioProcessPropertyPID); var v: pid_t = 0
+        var s = UInt32(MemoryLayout<pid_t>.size)
+        return AudioObjectGetPropertyData(obj, &a, 0, nil, &s, &v) == 0 ? v : nil
+    }
+
+    private func isRunningOutput(_ obj: AudioObjectID) -> Bool {
+        var a = gaddr(kAudioProcessPropertyIsRunningOutput); var v: UInt32 = 0
+        var s = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(obj, &a, 0, nil, &s, &v) == 0 && v != 0
+    }
+
+    /// Rebuild the active set from Core Audio, merge into `entries` (keeping
+    /// lingering rows), then prune + publish.
+    private func refresh() {
+        guard !isStopped else { return }
+        let now = Date()
+        var activeKeys: Set<String> = []
+        for obj in procObjects() {
+            guard isRunningOutput(obj), let p = pid(of: obj), !excludePIDs.contains(p) else { continue }
+            let bundleID = getString(obj, kAudioProcessPropertyBundleID) ?? ""
+            if !bundleID.isEmpty, excludeBundleIDs.contains(bundleID) { continue }
+            // One bundle can have several audio processes (e.g. Chrome helpers);
+            // collapse them to a single row keyed by bundle id.
+            let key = bundleID.isEmpty ? "pid:\(p)" : bundleID
+            activeKeys.insert(key)
+            if let e = entries[key] {
+                e.active = true; e.lastActive = now; e.pid = p
+                if e.name.isEmpty { e.name = resolveName(pid: p, bundleID: bundleID) }
+            } else {
+                entries[key] = Entry(bundleID: bundleID,
+                                     name: resolveName(pid: p, bundleID: bundleID),
+                                     pid: p, active: true, lastActive: now)
+            }
+        }
+        for (key, e) in entries where e.active && !activeKeys.contains(key) {
+            // Just went silent — start the linger clock from now.
+            e.active = false
+            e.lastActive = now
+        }
+        pruneExpired()
+    }
+
+    private func pruneExpired() {
+        guard !isStopped else { return }
+        let now = Date()
+        let expired = entries.filter { !$0.value.active && now.timeIntervalSince($0.value.lastActive) > Self.lingerWindow }
+        for key in expired.keys { entries.removeValue(forKey: key) }
+        publishIfChanged()
+    }
+
+    private func publishIfChanged() {
+        // Phase 1: gain/muted are always the defaults (no render-path override yet).
+        let snapshot = entries.values
+            .map { AppEntry(bundleID: $0.bundleID, name: $0.name, pid: Int($0.pid),
+                            gain: 100, muted: false, active: $0.active) }
+            .sorted { ($0.name.lowercased(), $0.bundleID) < ($1.name.lowercased(), $1.bundleID) }
+        guard snapshot != published else { return }
+        published = snapshot
+        onChange(snapshot)
+    }
+
+    /// pid -> display name: localizedName for GUI apps, else a bundle-id tail or
+    /// the executable name, else the pid.
+    private func resolveName(pid: pid_t, bundleID: String) -> String {
+        if let app = NSRunningApplication(processIdentifier: pid),
+           let n = app.localizedName, !n.isEmpty {
+            return n
+        }
+        if !bundleID.isEmpty {
+            return bundleID.components(separatedBy: ".").last ?? bundleID
+        }
+        return processName(pid: pid) ?? "pid \(pid)"
+    }
+
+    private func processName(pid: pid_t) -> String? {
+        var buf = [CChar](repeating: 0, count: 256)
+        guard proc_name(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
+        let s = String(cString: buf)
+        return s.isEmpty ? nil : s
+    }
+}
+
 // MARK: - engine: pipeline lifecycle + device tracking
 
 final class Engine {
@@ -333,10 +545,17 @@ final class Engine {
     /// or republish running:true after the final status write.
     private var isShutdown = false
     private var pendingWork: DispatchWorkItem?
-    private var lastStatus: (Control, Bool, Bool, String, String)?
+    /// Last status.json bytes we wrote, for deduping redundant writes (now that
+    /// the payload includes the apps roster, comparing serialized bytes is the
+    /// simplest exact equality check).
+    private var lastStatusData: Data?
     /// Why the pipeline is down: "" (it's up), "no-device", or the error text.
     private var lastReason = ""
     private var meterTimer: DispatchSourceTimer?
+    /// Live "producing audio" roster, maintained by AppRoster and published in
+    /// status.json. Read-only in Phase 1 (no render-path effect).
+    private var roster: AppRoster?
+    private var currentApps: [AppEntry] = []
 
     // Listener blocks are retained so they can be removed symmetrically.
     private var systemListener: AudioObjectPropertyListenerBlock!
@@ -379,6 +598,21 @@ final class Engine {
 
             rebuildLocked(reason: "startup")
 
+            // Publish the live "producing audio" roster. Independent of the tap
+            // pipeline: it only reads process-object properties, so it works
+            // even while the pipeline is down (e.g. permission not yet granted).
+            let r = AppRoster(excludePIDs: [getpid()],
+                              excludeBundleIDs: ["gg.pim.loudini", "gg.pim.loudini.menubar"]) { [weak self] apps in
+                guard let self else { return }
+                self.queue.async {
+                    guard !self.isShutdown else { return }
+                    self.currentApps = apps
+                    self.publishStatus()
+                }
+            }
+            r.start()
+            roster = r
+
             if meterEnabled {
                 let t = DispatchSource.makeTimerSource(queue: queue)
                 t.schedule(deadline: .now() + 1, repeating: 1)
@@ -409,6 +643,9 @@ final class Engine {
             isShutdown = true
             pendingWork?.cancel()
             meterTimer?.cancel()
+            roster?.stop()
+            roster = nil
+            currentApps = []
             removeDeviceListeners()
             if overrideUID == nil {
                 _ = AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
@@ -417,7 +654,7 @@ final class Engine {
             pipeline?.destroy()
             pipeline = nil
             writeStatus(control, running: false, pipeline: false,
-                        device: currentDevice?.name ?? "", reason: "")
+                        device: currentDevice?.name ?? "", reason: "", apps: [])
             log("shutdown: tap + aggregate destroyed, direct audio path restored")
         }
     }
@@ -521,10 +758,13 @@ final class Engine {
     }
 
     private func publishStatus() {
-        let entry = (control, true, pipeline != nil, currentDevice?.name ?? "", lastReason)
-        if let last = lastStatus, last == entry { return }
-        lastStatus = entry
-        writeStatus(entry.0, running: entry.1, pipeline: entry.2, device: entry.3, reason: entry.4)
+        guard let data = statusData(control, running: true, pipeline: pipeline != nil,
+                                    device: currentDevice?.name ?? "", reason: lastReason,
+                                    apps: currentApps) else { return }
+        if lastStatusData == data { return }
+        lastStatusData = data
+        do { try atomicWrite(data, to: statusURL) }
+        catch { log("status write failed: \(error.localizedDescription)") }
     }
 }
 
@@ -582,6 +822,7 @@ usage: loudini-helper [--device <UID>]   run the gain daemon (default: current o
        loudini-helper mute               toggle mute
        loudini-helper set <0-100>        set gain
        loudini-helper get                print current level (status.json if present)
+       loudini-helper apps               list apps currently producing audio (from status.json)
        loudini-helper doctor             diagnose the whole setup, with fixes
        loudini-helper brightness up|down [step] | set <0-100> | get
                                          external-monitor brightness over DDC (no permission needed)
@@ -604,7 +845,7 @@ enum LoudiniHelper {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         switch args.first {
-        case "up", "down", "mute", "set", "get":
+        case "up", "down", "mute", "set", "get", "apps":
             runCLI(args)
         case "doctor":
             runDoctor()
@@ -646,6 +887,20 @@ enum LoudiniHelper {
                 } else {
                     let c = ControlOps.current()
                     print("gain=\(c.gain) muted=\(c.muted) running=false pipeline=false device=\"\"")
+                }
+            case "apps":
+                // Read-only: print the daemon's published roster of apps that are
+                // currently producing audio (status.json). Never touches Core Audio.
+                guard args.count == 1 else { usage() }
+                let apps = readStatus()?.apps ?? []
+                if apps.isEmpty {
+                    print("No apps are producing audio.")
+                } else {
+                    for a in apps {
+                        let id = a.bundleID.isEmpty ? "-" : a.bundleID
+                        let idle = a.active ? "" : "  (idle)"
+                        print("\(id)\t\(a.name)\tgain=\(a.gain)\tmuted=\(a.muted)\(idle)")
+                    }
                 }
             default:
                 usage()

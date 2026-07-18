@@ -12,7 +12,7 @@ app="${menubar_dir}/Loudini.app"
 echo "building loudini-helper (daemon + CLI)…"
 (cd "${repo_dir}/helper" && swiftc -O -parse-as-library -o loudini-helper \
   loudini-helper.swift ControlFile.swift DDC.swift \
-  -framework CoreAudio -framework AudioToolbox -framework Foundation -framework IOKit)
+  -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit)
 
 rm -rf "${app:?}"
 mkdir -p "${app}/Contents/MacOS"

@@ -63,7 +63,8 @@ them in order because each builds on the last, but the deliverable is the whole 
   near the bottom, and the control/status file IO. You'll extend the arg parsing in Phase 1.
 - `helper/loudini-helper` — compiled arm64 binary (already built). Recompile with:
   ```
-  swiftc -O -o loudini-helper loudini-helper.swift -framework CoreAudio -framework AudioToolbox -framework Foundation
+  swiftc -O -parse-as-library -o loudini-helper loudini-helper.swift ControlFile.swift DDC.swift \
+    -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit
   ```
 - `plugin/src/control.ts` — the TS side of the contract. Exports `readControl()`/`writeControl(c)`/
   `readStatus()`/`nudge(delta)`/`toggleMute()`. Mirror this behavior in the Swift CLI so both frontends
@@ -75,8 +76,11 @@ them in order because each builds on the last, but the deliverable is the whole 
 
 - **`~/.config/loudini/control.json`** — `{"gain": <int 0-100>, "muted": <bool>}`. Any frontend WRITES
   this. The daemon reads it every 100 ms (lenient parse: bad/partial JSON keeps the last good value).
-- **`~/.config/loudini/status.json`** — `{"gain","muted","running","device"}`. The daemon WRITES this
-  atomically on every change (and `running:false` on shutdown). Frontends READ it to show the live level.
+- **`~/.config/loudini/status.json`** — `{"gain","muted","running","device","apps"}`. The daemon WRITES
+  this atomically on every change (and `running:false` on shutdown). Frontends READ it to show the live
+  level. `apps` is the live read-only roster of processes producing audio right now
+  (`kAudioProcessPropertyIsRunningOutput`): `[{bundleID,name,pid,gain,muted,active}]` — see
+  `SPEC-per-app-volume.md`. `loudini apps` prints it.
 - **All writes to `control.json` MUST be atomic** (write a temp file in the same dir, then `rename()`),
   because up to three frontends may write it concurrently and the daemon reads it mid-write. This is the
   #1 thing to get right and the #1 thing to have Codex check.

@@ -133,6 +133,9 @@ Two JSON files in `~/.config/loudini/` are the whole API:
     missing (or `reason:"no-device"`: no output device).
   - `device` — current output device name; `pid` — the daemon's process id; `reason` — why the
     pipeline is down (omitted when it's up).
+  - `apps` — the live roster of apps currently producing audio (read-only):
+    `[{bundleID,name,pid,gain,muted,active}]`. Populated from
+    `kAudioProcessPropertyIsRunningOutput`; `loudini apps` prints it. See `SPEC-per-app-volume.md`.
 
 ## Troubleshooting
 
