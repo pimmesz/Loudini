@@ -1,12 +1,19 @@
 // loudini-helper.swift — Loudini system-audio gain daemon (macOS 14.4+ process taps)
 //
-// Taps ALL output-producing processes except itself (global tap, self excluded),
-// mutes their direct path (.mutedWhenTapped), and re-renders the mix to the
-// current default output device (or --device <UID>) through an IOProc that
-// multiplies samples by a software gain.
+// Taps output-producing processes and re-renders them to the current default
+// output device (or --device <UID>) through an IOProc that multiplies samples
+// by a software master gain. Approach A per-app volume (Phase 2): each app with
+// an entry in control.json's `apps` map gets its OWN private tap feeding its own
+// gain; those are summed with the global tap (which excludes them) BEFORE the
+// master multiply. A per-app tap that fails to create falls open — its app just
+// rides the global/master path, audio never dropped. Direct paths are muted
+// (.mutedWhenTapped).
 //
-// Control:  ~/.config/loudini/control.json   {"gain": <int 0-100>, "muted": <bool>}
-//           polled every 100ms; effective multiplier = muted ? 0 : gain/100.
+// Control:  ~/.config/loudini/control.json
+//           {"gain": <int 0-100>, "muted": <bool>,
+//            "apps": {"<bundleID>": {"gain": 0-100, "muted": bool}, ...}}  (apps optional)
+//           polled every 100ms; master multiplier = muted ? 0 : gain/100,
+//           per-app multiplier applied pre-master (effective = master × app).
 // Status:   ~/.config/loudini/status.json    {"gain","muted","running","device","apps"}
 //           written atomically at startup, on every change, and on shutdown
 //           (running:false). "apps" is the live roster of processes producing
@@ -137,11 +144,38 @@ func writeStatus(_ c: Control, running: Bool, pipeline: Bool, device: String,
 
 // MARK: - tap -> aggregate -> gain pipeline
 
+/// One requested per-app tap (approach A): all live process objects for an
+/// overridden bundle id, mixed down to a single stereo stream, with the gain
+/// to apply to it before the master multiply.
+struct AppTapSpec {
+    let bundleID: String
+    let procs: [AudioObjectID]
+    let gain: Float
+}
+
 final class Pipeline {
-    private(set) var tapID = AudioObjectID(kAudioObjectUnknown)
+    private(set) var tapID = AudioObjectID(kAudioObjectUnknown)   // global tap
     private(set) var aggID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var started = false
+
+    // Per-app taps (approach A). Each overridden app that got its own tap
+    // arrives on its own buffer, is scaled by its per-app gain, and is summed
+    // with the global tap BEFORE the master multiply. The global tap excludes
+    // exactly these apps' processes, so nothing is double-counted; an app whose
+    // tap failed to create is left in the global tap (fail-open -> master path).
+    private(set) var appTapIDs: [AudioObjectID] = []
+    /// bundle ids of the app taps we actually built, in buffer order — lets the
+    /// engine map a bundle id to its gain slot for lock-free in-place updates.
+    private(set) var bundleIDsInOrder: [String] = []
+    /// Per-app gain slots, one per built app tap, read unsynchronized by the IO
+    /// thread exactly like `gain`. Preallocated once (upper bound = requested
+    /// taps) so the render loop never allocates; freed in deinit / on init throw.
+    private let appGains: UnsafeMutablePointer<Float>
+    private var appTapCount = 0
+    /// Total tap buffers appended to the aggregate input ABL: 1 (global) + built
+    /// app taps. The render loop uses it to find where the tap buffers start.
+    private var tapBufferCount = 1
 
     // First-callback ABL shape, captured with plain word stores (the render
     // thread must not allocate, lock, or do IO) and logged later off-thread.
@@ -163,13 +197,58 @@ final class Pipeline {
     private var meterSamples = 0
     private var callbacks: UInt64 = 0
 
-    init(excludeProcs: [AudioObjectID], outUID: String, gain: Float, meter: Bool) throws {
+    init(excludeProcs: [AudioObjectID], appTaps: [AppTapSpec],
+         outUID: String, gain: Float, meter: Bool) throws {
         self.gain = gain
         self.meterEnabled = meter
+        // Upper bound: never more built taps than requested. All of self's stored
+        // properties are initialized by this point, so a `throw` below still runs
+        // deinit — which frees this. abort() therefore frees only HAL taps, never
+        // appGains (deinit owns it), to avoid a double free.
+        let gainCapacity = max(1, appTaps.count)
+        self.appGains = UnsafeMutablePointer<Float>.allocate(capacity: gainCapacity)
+        self.appGains.initialize(repeating: 1, count: gainCapacity)
 
-        // Global stereo mixdown of every output-producing process except the
-        // excluded ones (us). New processes are covered automatically.
-        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excludeProcs)
+        // Taps created so far, torn down together on any failure below.
+        var createdTaps: [AudioObjectID] = []
+        func abort(_ code: OSStatus, _ what: String) -> NSError {
+            for t in createdTaps { AudioHardwareDestroyProcessTap(t) }
+            return NSError(domain: "loudini", code: Int(code),
+                           userInfo: [NSLocalizedDescriptionKey: "\(what): \(fourCC(code))"])
+        }
+
+        // 1. Per-app taps (approach A). Each is a private stereo mixdown of one
+        //    bundle's live processes. Fail-open PER TAP: a tap that won't create
+        //    is dropped and its app simply stays in the global tap below, riding
+        //    the master path — its audio is never lost.
+        var appTapUIDs: [String] = []
+        var tappedProcs: [AudioObjectID] = []
+        for spec in appTaps where !spec.procs.isEmpty {
+            let d = CATapDescription(stereoMixdownOfProcesses: spec.procs)
+            d.name = "Loudini app tap \(spec.bundleID)"
+            d.isPrivate = true
+            d.muteBehavior = .mutedWhenTapped
+            var t = AudioObjectID(kAudioObjectUnknown)
+            let e = AudioHardwareCreateProcessTap(d, &t)
+            guard e == 0, t != kAudioObjectUnknown else {
+                log("per-app tap for \(spec.bundleID) failed: \(fourCC(e)) — routing it through the master path (fail-open)")
+                continue
+            }
+            let slot = bundleIDsInOrder.count
+            appGains[slot] = spec.gain
+            bundleIDsInOrder.append(spec.bundleID)
+            appTapIDs.append(t)
+            appTapUIDs.append(getString(t, kAudioTapPropertyUID) ?? d.uuid.uuidString)
+            tappedProcs.append(contentsOf: spec.procs)
+            createdTaps.append(t)
+        }
+        appTapCount = bundleIDsInOrder.count
+        tapBufferCount = 1 + appTapCount
+
+        // 2. Global stereo mixdown of every output-producing process except us
+        //    AND the apps we successfully gave their own tap. New processes are
+        //    covered automatically (and picked up by a rebuild if overridden).
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excludeProcs + tappedProcs)
         desc.name = "Loudini tap"
         desc.isPrivate = true
         desc.muteBehavior = .mutedWhenTapped
@@ -177,29 +256,31 @@ final class Pipeline {
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapErr = AudioHardwareCreateProcessTap(desc, &tap)
         guard tapErr == 0, tap != kAudioObjectUnknown else {
-            throw NSError(domain: "loudini", code: Int(tapErr),
-                          userInfo: [NSLocalizedDescriptionKey: "AudioHardwareCreateProcessTap failed: \(fourCC(tapErr))"])
+            throw abort(tapErr, "AudioHardwareCreateProcessTap failed")
         }
         tapID = tap
+        createdTaps.append(tap)
         let tapUID = getString(tapID, kAudioTapPropertyUID) ?? desc.uuid.uuidString
 
-        // Aggregate: real output device as sub-device + tap. Key literals
-        // verified against AudioHardware.h and proven in the prototype.
+        // Aggregate: real output device as sub-device + all taps. The global tap
+        // is listed FIRST, the per-app taps after it in build order, so the tap
+        // buffers appear in that same order at the tail of the input ABL. Key
+        // literals verified against AudioHardware.h and proven in the prototype.
+        let tapList: [[String: Any]] = [["uid": tapUID, "drift": true]]
+            + appTapUIDs.map { ["uid": $0, "drift": true] }
         let aggDesc: [String: Any] = [
             "name": "Loudini",
             "uid": UUID().uuidString,
             "private": true,
             "master": outUID,
             "subdevices": [["uid": outUID, "drift": false]],
-            "taps": [["uid": tapUID, "drift": true]],
+            "taps": tapList,
             "tapautostart": true,
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)
         let aggErr = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg)
         guard aggErr == 0, agg != kAudioObjectUnknown else {
-            AudioHardwareDestroyProcessTap(tapID)
-            throw NSError(domain: "loudini", code: Int(aggErr),
-                          userInfo: [NSLocalizedDescriptionKey: "AudioHardwareCreateAggregateDevice failed: \(fourCC(aggErr))"])
+            throw abort(aggErr, "AudioHardwareCreateAggregateDevice failed")
         }
         aggID = agg
 
@@ -211,6 +292,7 @@ final class Pipeline {
             let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             let outList = UnsafeMutableAudioBufferListPointer(outOutputData)
             let g = self.gain
+            let tapCount = self.tapBufferCount
 
             for ob in outList where ob.mData != nil {
                 memset(ob.mData!, 0, Int(ob.mDataByteSize))
@@ -218,60 +300,83 @@ final class Pipeline {
 
             // The aggregate's input ABL = the sub-device's own input streams
             // first (e.g. an interface's mic/line inputs), then the tap streams
-            // appended LAST. Forward only the last buffer (verified empirically).
-            guard inList.count > 0, outList.count > 0 else { return }
-            let ib = inList[inList.count - 1]
+            // appended LAST, one buffer per tap, in the aggregate's tap order:
+            // global tap, then the per-app taps we built. So the tap buffers are
+            // the final `tapCount` buffers; the app taps follow the global one.
+            let nIn = inList.count
+            guard nIn >= tapCount, outList.count > 0 else { return }
+            let base = nIn - tapCount                // index of the global tap buffer
             let ob = outList[0]
-            guard let srcRaw = ib.mData, let dstRaw = ob.mData else { return }
+            guard let dstRaw = ob.mData else { return }
+            let dst = dstRaw.assumingMemoryBound(to: Float32.self)
+            let outCh = max(Int(ob.mNumberChannels), 1)
+            let outCount = Int(ob.mDataByteSize) / MemoryLayout<Float32>.size
 
             if !self.loggedShape {
-                self.shapeInBufs = Int32(inList.count)
+                let gib = inList[base]
+                self.shapeInBufs = Int32(nIn)
                 self.shapeOutBufs = Int32(outList.count)
-                self.shapeTapCh = Int32(ib.mNumberChannels)
-                self.shapeTapBytes = ib.mDataByteSize
+                self.shapeTapCh = Int32(gib.mNumberChannels)
+                self.shapeTapBytes = gib.mDataByteSize
                 self.shapeOutCh = Int32(ob.mNumberChannels)
                 self.shapeOutBytes = ob.mDataByteSize
                 self.loggedShape = true
             }
 
-            let src = srcRaw.assumingMemoryBound(to: Float32.self)
-            let dst = dstRaw.assumingMemoryBound(to: Float32.self)
-            let inCh = max(Int(ib.mNumberChannels), 1)
-            let outCh = max(Int(ob.mNumberChannels), 1)
-            let inCount = Int(ib.mDataByteSize) / MemoryLayout<Float32>.size
-            let outCount = Int(ob.mDataByteSize) / MemoryLayout<Float32>.size
-
-            var sIn = 0.0, sOut = 0.0
-            var written = 0
-            if inCh == outCh {
-                let n = min(inCount, outCount)
-                for k in 0..<n {
-                    let v = src[k]
-                    let w = v * g
-                    dst[k] = w
-                    if self.meterEnabled { sIn += Double(v * v); sOut += Double(w * w) }
-                }
-                written = n
-            } else {
-                // Channel counts differ (e.g. stereo tap -> multichannel device):
-                // map channel-for-channel per frame, leave extra channels silent.
-                let frames = min(inCount / inCh, outCount / outCh)
-                let ch = min(inCh, outCh)
-                for f in 0..<frames {
-                    for c in 0..<ch {
-                        let v = src[f * inCh + c]
-                        let w = v * g
-                        dst[f * outCh + c] = w
-                        if self.meterEnabled { sIn += Double(v * v); sOut += Double(w * w) }
+            // Sum every tap into the (pre-zeroed) output, each scaled by its own
+            // gain times the master g — folding the master multiply into each add
+            // keeps it a single pass and allocation/lock-free. Global tap gain is
+            // 1.0 (untouched apps); app-tap gain is the per-app slot. sIn meters
+            // the global tap only (representative), sOut the mixed result.
+            var sIn = 0.0
+            var t = 0
+            while t < tapCount {
+                let coeff = (t == 0 ? Float(1) : self.appGains[t - 1]) * g
+                if coeff != 0 {
+                    let ib = inList[base + t]
+                    if let srcRaw = ib.mData {
+                        let src = srcRaw.assumingMemoryBound(to: Float32.self)
+                        let inCh = max(Int(ib.mNumberChannels), 1)
+                        let inCount = Int(ib.mDataByteSize) / MemoryLayout<Float32>.size
+                        if inCh == outCh {
+                            let n = min(inCount, outCount)
+                            var k = 0
+                            while k < n {
+                                let v = src[k]
+                                dst[k] += v * coeff
+                                if self.meterEnabled && t == 0 { sIn += Double(v * v) }
+                                k += 1
+                            }
+                        } else {
+                            // Channel counts differ (e.g. stereo tap -> multichannel
+                            // device): map channel-for-channel per frame, leave extra
+                            // output channels silent.
+                            let frames = min(inCount / inCh, outCount / outCh)
+                            let ch = min(inCh, outCh)
+                            var f = 0
+                            while f < frames {
+                                var c = 0
+                                while c < ch {
+                                    let v = src[f * inCh + c]
+                                    dst[f * outCh + c] += v * coeff
+                                    if self.meterEnabled && t == 0 { sIn += Double(v * v) }
+                                    c += 1
+                                }
+                                f += 1
+                            }
+                        }
                     }
                 }
-                written = frames * ch
+                t += 1
             }
 
             if self.meterEnabled {
+                var sOut = 0.0
+                var k = 0
+                while k < outCount { let w = dst[k]; sOut += Double(w * w); k += 1 }
                 os_unfair_lock_lock(&self.meterLock)
                 self.sumIn += sIn; self.sumOut += sOut
-                self.meterSamples += written; self.callbacks += 1
+                self.meterSamples += outCount; self.callbacks += 1
                 os_unfair_lock_unlock(&self.meterLock)
             }
         }
@@ -280,11 +385,18 @@ final class Pipeline {
         let ioErr = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, nil, io)
         guard ioErr == 0, procID != nil else {
             AudioHardwareDestroyAggregateDevice(aggID)
-            AudioHardwareDestroyProcessTap(tapID)
-            throw NSError(domain: "loudini", code: Int(ioErr),
-                          userInfo: [NSLocalizedDescriptionKey: "AudioDeviceCreateIOProcIDWithBlock failed: \(fourCC(ioErr))"])
+            throw abort(ioErr, "AudioDeviceCreateIOProcIDWithBlock failed")   // abort() tears down every tap; deinit frees appGains
         }
         ioProcID = procID
+    }
+
+    deinit { appGains.deallocate() }
+
+    /// Update one built app tap's gain slot. Lock-free: a word-aligned 32-bit
+    /// store, read by the IO thread each callback exactly like `gain`.
+    func setAppGain(_ slot: Int, _ g: Float) {
+        guard slot >= 0, slot < appTapCount else { return }
+        appGains[slot] = g
     }
 
     func start() throws {
@@ -331,6 +443,8 @@ final class Pipeline {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
+        for t in appTapIDs { AudioHardwareDestroyProcessTap(t) }
+        appTapIDs = []
     }
 }
 
@@ -564,14 +678,26 @@ final class Engine {
     private var roster: AppRoster?
     private var currentApps: [AppEntry] = []
 
+    /// Signature of the (overridden ∩ live) process-object set the current
+    /// pipeline was built for. A change here (app launch/quit, or the override
+    /// map gaining/losing a key) requires a rebuild; a pure gain change does not.
+    private var currentAppTapSig = ""
+    /// bundle id -> gain slot for the app taps the current pipeline actually
+    /// built, used for lock-free in-place per-app gain updates.
+    private var builtBundleIndex: [String: Int] = [:]
+
     // Listener blocks are retained so they can be removed symmetrically.
     private var systemListener: AudioObjectPropertyListenerBlock!
     private var deviceListener: AudioObjectPropertyListenerBlock!
     private var deviceListenerTarget = AudioObjectID(kAudioObjectUnknown)
+    /// Fires when processes appear/disappear, so a launched/quit overridden app
+    /// re-forms its per-app tap. Independent of AppRoster's own list listener.
+    private var procListListener: AudioObjectPropertyListenerBlock!
 
     private var defaultOutAddr = gaddr(kAudioHardwarePropertyDefaultOutputDevice)
     private var rateAddr = gaddr(kAudioDevicePropertyNominalSampleRate)
     private var aliveAddr = gaddr(kAudioDevicePropertyDeviceIsAlive)
+    private var procListAddr = gaddr(kAudioHardwarePropertyProcessObjectList)
 
     init(overrideUID: String?, meter: Bool) {
         self.overrideUID = overrideUID
@@ -602,6 +728,13 @@ final class Engine {
                 _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
                                                         &defaultOutAddr, queue, systemListener)
             }
+
+            // Watch the process-object list so an overridden app launching or
+            // quitting re-forms (or drops) its per-app tap. Cheap: it only
+            // rebuilds when the tapped-process SET actually changes.
+            procListListener = { [weak self] _, _ in self?.reconcileAppTaps() }
+            _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                    &procListAddr, queue, procListListener)
 
             rebuildLocked(reason: "startup")
 
@@ -640,8 +773,53 @@ final class Engine {
             guard !isShutdown, newControl != control else { return }
             control = newControl
             pipeline?.gain = newControl.multiplier
-            log("control: gain=\(newControl.gain) muted=\(newControl.muted) -> multiplier \(newControl.multiplier)")
+            // Per-app: rebuild only if the tapped-process SET changed (a bundle
+            // gained/lost an override, or its process set changed). A pure gain
+            // change reuses the existing taps — a lock-free float store, no HAL
+            // churn, no render glitch.
+            if pipeline != nil {
+                if appTapSig(desiredAppTaps()) != currentAppTapSig {
+                    scheduleRebuild(reason: "per-app override set changed")
+                } else {
+                    for (bid, slot) in builtBundleIndex {
+                        pipeline?.setAppGain(slot, control.apps[bid]?.multiplier ?? 1)
+                    }
+                }
+            }
+            log("control: gain=\(newControl.gain) muted=\(newControl.muted) apps=\(newControl.apps.count) -> master \(newControl.multiplier)")
             publishStatus()
+        }
+    }
+
+    /// The per-app taps we WANT right now: each overridden bundle id that has at
+    /// least one live process object, paired with those objects (all of them —
+    /// one bundle can have several audio processes, e.g. Chrome helpers). Sorted
+    /// for a stable signature.
+    private func desiredAppTaps() -> [(bundleID: String, procs: [AudioObjectID])] {
+        guard !control.apps.isEmpty else { return [] }
+        var byBundle: [String: [AudioObjectID]] = [:]
+        for obj in getIDs(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList) {
+            guard let bid = getString(obj, kAudioProcessPropertyBundleID), !bid.isEmpty,
+                  control.apps[bid] != nil else { continue }
+            byBundle[bid, default: []].append(obj)
+        }
+        return control.apps.keys.sorted().compactMap { bid in
+            guard let procs = byBundle[bid], !procs.isEmpty else { return nil }
+            return (bundleID: bid, procs: procs.sorted())
+        }
+    }
+
+    private func appTapSig(_ taps: [(bundleID: String, procs: [AudioObjectID])]) -> String {
+        taps.map { "\($0.bundleID)=\($0.procs.map(String.init).joined(separator: ","))" }
+            .joined(separator: "|")
+    }
+
+    /// Process list changed — rebuild only if that moved the tapped-process set
+    /// (an overridden app launched/quit). Pauses and unrelated apps are no-ops.
+    private func reconcileAppTaps() {
+        guard !isShutdown, pipeline != nil else { return }   // pipeline down -> retry loop rebuilds
+        if appTapSig(desiredAppTaps()) != currentAppTapSig {
+            scheduleRebuild(reason: "overridden app launched/quit")
         }
     }
 
@@ -657,6 +835,10 @@ final class Engine {
             if overrideUID == nil {
                 _ = AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
                                                            &defaultOutAddr, queue, systemListener)
+            }
+            if procListListener != nil {
+                _ = AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                           &procListAddr, queue, procListListener)
             }
             pipeline?.destroy()
             pipeline = nil
@@ -709,8 +891,11 @@ final class Engine {
             return
         }
 
+        let desired = desiredAppTaps()
+        let specs = desired.map { AppTapSpec(bundleID: $0.bundleID, procs: $0.procs,
+                                             gain: control.apps[$0.bundleID]?.multiplier ?? 1) }
         do {
-            let p = try Pipeline(excludeProcs: [selfProc], outUID: dev.uid,
+            let p = try Pipeline(excludeProcs: [selfProc], appTaps: specs, outUID: dev.uid,
                                  gain: control.multiplier, meter: meterEnabled)
             do {
                 try p.start()
@@ -724,8 +909,19 @@ final class Engine {
             pipeline = p
             currentDevice = dev
             lastReason = ""
+            // Signature reflects what we WANTED (`desired`), not what built, so a
+            // per-app tap that failed-open into the master path doesn't make the
+            // set look "changed" every poll and thrash rebuilds.
+            currentAppTapSig = appTapSig(desired)
+            builtBundleIndex = Dictionary(uniqueKeysWithValues:
+                p.bundleIDsInOrder.enumerated().map { ($1, $0) })
             addDeviceListeners(dev.id)
-            log("pipeline live (\(reason)): global tap [excl. pid \(getpid())] -> gain \(control.multiplier) -> \(dev.name) [\(dev.uid)]")
+            let appNote = p.bundleIDsInOrder.isEmpty
+                ? "no per-app taps"
+                : "per-app taps: \(p.bundleIDsInOrder.joined(separator: ", "))"
+            let dropped = desired.count - p.bundleIDsInOrder.count
+            let droppedNote = dropped > 0 ? " (\(dropped) fell open to master path)" : ""
+            log("pipeline live (\(reason)): global tap [excl. pid \(getpid())] -> master \(control.multiplier) -> \(dev.name) [\(dev.uid)]; \(appNote)\(droppedNote)")
             scheduleShapeLog(for: p)
             publishStatus()
         } catch {
@@ -764,10 +960,25 @@ final class Engine {
         deviceListenerTarget = AudioObjectID(kAudioObjectUnknown)
     }
 
+    /// The roster to publish: the live "producing audio" list with each entry's
+    /// gain/muted overlaid from the active per-app override (default 100/false).
+    /// The roster itself stays override-agnostic; the overlay happens here so
+    /// status.json always echoes the applied value.
+    private func appsForStatus() -> [AppEntry] {
+        guard !control.apps.isEmpty else { return currentApps }
+        return currentApps.map { entry in
+            guard let o = control.apps[entry.bundleID] else { return entry }
+            var e = entry
+            e.gain = o.gain
+            e.muted = o.muted
+            return e
+        }
+    }
+
     private func publishStatus() {
         guard let data = statusData(control, running: true, pipeline: pipeline != nil,
                                     device: currentDevice?.name ?? "", reason: lastReason,
-                                    apps: currentApps) else { return }
+                                    apps: appsForStatus()) else { return }
         if lastStatusData == data { return }
         // Only mark this state as published once the write actually lands — a
         // transient write failure must not suppress the retry on the next tick.

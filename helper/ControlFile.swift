@@ -18,9 +18,21 @@ let statusURL = configDir.appendingPathComponent("status.json")
 
 func clampGain(_ n: Int) -> Int { min(100, max(0, n)) }
 
-struct Control: Equatable {
+/// One per-app override from control.json's `apps` map (Phase 2). Effective
+/// per-app level = master × app; a muted app contributes zero before the master
+/// multiply. `gain`/`muted` here are strictly a PRE-master attenuation.
+struct AppOverride: Equatable {
     var gain: Int    // 0-100
     var muted: Bool
+    var multiplier: Float { muted ? 0 : Float(gain) / 100 }
+}
+
+struct Control: Equatable {
+    var gain: Int    // 0-100 (master)
+    var muted: Bool  // master
+    /// Per-app overrides keyed by bundle id. Absent app ⇒ rides master only.
+    /// Backward compatible: an old control.json without `apps` yields [:].
+    var apps: [String: AppOverride] = [:]
     var multiplier: Float { muted ? 0 : Float(gain) / 100 }
 }
 
@@ -31,8 +43,8 @@ struct AppEntry: Equatable {
     var bundleID: String   // stable id, "" for sources without a bundle (CLI/helper audio)
     var name: String       // localizedName, or a bundle-id / process-name fallback
     var pid: Int           // a representative live pid for the app
-    var gain: Int          // applied per-app override, 0-100 (Phase 1: always 100)
-    var muted: Bool        // applied per-app mute (Phase 1: always false)
+    var gain: Int          // applied per-app override, 0-100 (default 100 when unset)
+    var muted: Bool        // applied per-app mute (default false when unset)
     var active: Bool       // IsRunningOutput now (false = lingering in the grace window)
 }
 
@@ -60,6 +72,19 @@ func readControl(previous: Control) -> Control? {
     var c = previous
     if let n = obj["gain"] as? NSNumber { c.gain = clampGain(n.intValue) }
     if let b = obj["muted"] as? Bool { c.muted = b }
+    // `apps` is lenient like the rest: absent or malformed keeps the previous
+    // map (last-good), an explicit {} clears it, and individual bad rows are
+    // dropped without discarding the good ones. Keyed by bundle id; empty keys
+    // are ignored (can't map to a real app).
+    if let appsObj = obj["apps"] as? [String: Any] {
+        var m: [String: AppOverride] = [:]
+        for (bid, v) in appsObj {
+            guard !bid.isEmpty, let r = v as? [String: Any] else { continue }
+            m[bid] = AppOverride(gain: clampGain((r["gain"] as? NSNumber)?.intValue ?? 100),
+                                 muted: r["muted"] as? Bool ?? false)
+        }
+        c.apps = m
+    }
     return c
 }
 
@@ -136,7 +161,14 @@ func atomicWrite(_ data: Data, to url: URL) throws {
 }
 
 func writeControl(_ c: Control) throws {
-    let obj: [String: Any] = ["gain": clampGain(c.gain), "muted": c.muted]
+    var obj: [String: Any] = ["gain": clampGain(c.gain), "muted": c.muted]
+    // Preserve per-app overrides across master-only writes (the CLI/menu-bar
+    // read-modify-write the whole Control, so dropping `apps` here would wipe a
+    // user's per-app settings on any master volume change). Omitted when empty
+    // to keep the file byte-identical to the pre-Phase-2 shape for master users.
+    if !c.apps.isEmpty {
+        obj["apps"] = c.apps.mapValues { ["gain": clampGain($0.gain), "muted": $0.muted] }
+    }
     let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     try atomicWrite(data, to: controlURL)
 }
