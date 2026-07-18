@@ -104,8 +104,11 @@ access:
 }
 ```
 
-`gain`/`muted` per entry echo the applied override (default 100/false); `active` reflects
-`IsRunningOutput` (vs. lingering in the grace window). Frontends render straight from this array.
+`gain`/`muted` per entry echo the **applied** override — the value only appears once that app's
+per-app tap is actually built. An app that fell open to the master path (tap create failed, the
+aggregate/IOProc build dropped it, or the pipeline is down) receives master-only gain, so its row
+reports the default 100/false, never the requested override. `active` reflects `IsRunningOutput`
+(vs. lingering in the grace window). Frontends render straight from this array.
 
 ## Frontend surface
 
@@ -134,7 +137,10 @@ access:
   them **all** down and audio returns to the normal direct path — same guarantee as today. No per-app
   path may create a state where a crash leaves an app muted.
 - If a per-app tap fails to create, **fall back to routing that app through the master path** (log it),
-  never drop its audio.
+  never drop its audio. Fail-open extends **past tap creation**: if a tap creates fine but then makes
+  the aggregate-device or IOProc build fail, drop **every** per-app tap to the master path and retry
+  the pipeline global-only (rather than isolating the single culprit, which would cost an O(n) rebuild
+  probe) — the global/master gain path must never be silenced by one bad per-app tap.
 - The render loop stays allocation-free and lock-free; per-app gains are plain floats updated by the
   100 ms control poll, read unsynchronized in the IOProc exactly like the master `gain` today.
 - Master mute and master gain still apply on top — per-app is strictly a pre-master attenuation.

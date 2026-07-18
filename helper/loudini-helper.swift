@@ -170,8 +170,10 @@ final class Pipeline {
     private(set) var bundleIDsInOrder: [String] = []
     /// Per-app gain slots, one per built app tap, read unsynchronized by the IO
     /// thread exactly like `gain`. Preallocated once (upper bound = requested
-    /// taps) so the render loop never allocates; freed in deinit / on init throw.
+    /// taps) so the render loop never allocates; freed via freeAppGains().
     private let appGains: UnsafeMutablePointer<Float>
+    /// Guards the single free of `appGains`. See freeAppGains().
+    private var appGainsFreed = false
     private var appTapCount = 0
     /// Total tap buffers appended to the aggregate input ABL: 1 (global) + built
     /// app taps. The render loop uses it to find where the tap buffers start.
@@ -201,21 +203,14 @@ final class Pipeline {
          outUID: String, gain: Float, meter: Bool) throws {
         self.gain = gain
         self.meterEnabled = meter
-        // Upper bound: never more built taps than requested. All of self's stored
-        // properties are initialized by this point, so a `throw` below still runs
-        // deinit — which frees this. abort() therefore frees only HAL taps, never
-        // appGains (deinit owns it), to avoid a double free.
+        // Upper bound: never more built taps than requested. Cleanup of appGains
+        // is NOT left to deinit — Swift does not reliably run deinit for a
+        // throwing initializer even after full initialization — so every throw
+        // path below calls freeAppGains() explicitly; the flag it checks makes a
+        // later deinit call a harmless no-op.
         let gainCapacity = max(1, appTaps.count)
         self.appGains = UnsafeMutablePointer<Float>.allocate(capacity: gainCapacity)
         self.appGains.initialize(repeating: 1, count: gainCapacity)
-
-        // Taps created so far, torn down together on any failure below.
-        var createdTaps: [AudioObjectID] = []
-        func abort(_ code: OSStatus, _ what: String) -> NSError {
-            for t in createdTaps { AudioHardwareDestroyProcessTap(t) }
-            return NSError(domain: "loudini", code: Int(code),
-                           userInfo: [NSLocalizedDescriptionKey: "\(what): \(fourCC(code))"])
-        }
 
         // 1. Per-app taps (approach A). Each is a private stereo mixdown of one
         //    bundle's live processes. Fail-open PER TAP: a tap that won't create
@@ -240,14 +235,49 @@ final class Pipeline {
             appTapIDs.append(t)
             appTapUIDs.append(getString(t, kAudioTapPropertyUID) ?? d.uuid.uuidString)
             tappedProcs.append(contentsOf: spec.procs)
-            createdTaps.append(t)
         }
         appTapCount = bundleIDsInOrder.count
         tapBufferCount = 1 + appTapCount
 
-        // 2. Global stereo mixdown of every output-producing process except us
-        //    AND the apps we successfully gave their own tap. New processes are
-        //    covered automatically (and picked up by a rebuild if overridden).
+        // 2. Global tap + aggregate + IOProc. Fail-open must extend PAST tap
+        //    CREATION: a per-app tap can create fine yet still make the aggregate
+        //    or the IOProc creation fail (e.g. an unusable tap UID, or too many
+        //    sub-streams). Abandoning the whole pipeline there would silence the
+        //    global/master path too, so instead we drop EVERY per-app tap to the
+        //    master path and retry global-only. Only if that also fails do we
+        //    give up (the engine's retry loop then rebuilds, audio meanwhile on
+        //    the untouched direct path).
+        do {
+            try buildOutput(excludeProcs: excludeProcs, tappedProcs: tappedProcs,
+                            outUID: outUID, appTapUIDs: appTapUIDs)
+        } catch {
+            guard !appTapIDs.isEmpty else { freeAppGains(); throw error }
+            log("aggregate/IOProc build failed with \(appTapIDs.count) per-app tap(s): "
+                + "\(error.localizedDescription) — dropping them to the master path and retrying global-only (fail-open)")
+            for t in appTapIDs { AudioHardwareDestroyProcessTap(t) }
+            appTapIDs = []
+            bundleIDsInOrder = []
+            appTapCount = 0
+            tapBufferCount = 1
+            do {
+                // No exclusions now: the dropped apps ride the global/master path.
+                try buildOutput(excludeProcs: excludeProcs, tappedProcs: [],
+                                outUID: outUID, appTapUIDs: [])
+            } catch {
+                freeAppGains()
+                throw error
+            }
+        }
+    }
+
+    /// Build the global tap, the aggregate device, and the IOProc for the given
+    /// per-app tap UIDs (empty = global-only). Cleans up the HAL objects IT
+    /// creates on failure; the per-app taps are owned/torn down by the caller.
+    private func buildOutput(excludeProcs: [AudioObjectID], tappedProcs: [AudioObjectID],
+                             outUID: String, appTapUIDs: [String]) throws {
+        // Global stereo mixdown of every output-producing process except us AND
+        // the apps we successfully gave their own tap. New processes are covered
+        // automatically (and picked up by a rebuild if overridden).
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excludeProcs + tappedProcs)
         desc.name = "Loudini tap"
         desc.isPrivate = true
@@ -256,10 +286,9 @@ final class Pipeline {
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapErr = AudioHardwareCreateProcessTap(desc, &tap)
         guard tapErr == 0, tap != kAudioObjectUnknown else {
-            throw abort(tapErr, "AudioHardwareCreateProcessTap failed")
+            throw Self.halError(tapErr, "AudioHardwareCreateProcessTap failed")
         }
         tapID = tap
-        createdTaps.append(tap)
         let tapUID = getString(tapID, kAudioTapPropertyUID) ?? desc.uuid.uuidString
 
         // Aggregate: real output device as sub-device + all taps. The global tap
@@ -280,7 +309,9 @@ final class Pipeline {
         var agg = AudioObjectID(kAudioObjectUnknown)
         let aggErr = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg)
         guard aggErr == 0, agg != kAudioObjectUnknown else {
-            throw abort(aggErr, "AudioHardwareCreateAggregateDevice failed")
+            AudioHardwareDestroyProcessTap(tap)
+            tapID = AudioObjectID(kAudioObjectUnknown)
+            throw Self.halError(aggErr, "AudioHardwareCreateAggregateDevice failed")
         }
         aggID = agg
 
@@ -385,12 +416,27 @@ final class Pipeline {
         let ioErr = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, nil, io)
         guard ioErr == 0, procID != nil else {
             AudioHardwareDestroyAggregateDevice(aggID)
-            throw abort(ioErr, "AudioDeviceCreateIOProcIDWithBlock failed")   // abort() tears down every tap; deinit frees appGains
+            aggID = AudioObjectID(kAudioObjectUnknown)
+            AudioHardwareDestroyProcessTap(tap)
+            tapID = AudioObjectID(kAudioObjectUnknown)
+            throw Self.halError(ioErr, "AudioDeviceCreateIOProcIDWithBlock failed")
         }
         ioProcID = procID
     }
 
-    deinit { appGains.deallocate() }
+    private static func halError(_ code: OSStatus, _ what: String) -> NSError {
+        NSError(domain: "loudini", code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: "\(what): \(fourCC(code))"])
+    }
+
+    /// Idempotent free for `appGains`, called from the throwing-init cleanup
+    /// paths and from deinit. The flag makes a double call a no-op, so it is
+    /// correct whether or not Swift runs deinit for a failed initializer.
+    private func freeAppGains() {
+        if !appGainsFreed { appGains.deallocate(); appGainsFreed = true }
+    }
+
+    deinit { freeAppGains() }
 
     /// Update one built app tap's gain slot. Lock-free: a word-aligned 32-bit
     /// store, read by the IO thread each callback exactly like `gain`.
@@ -863,6 +909,10 @@ final class Engine {
         removeDeviceListeners()
         pipeline?.destroy()
         pipeline = nil
+        // No pipeline ⇒ no per-app tap is applied. Clear the built index now so
+        // appsForStatus() reports master-only for every app while we are down or
+        // if this rebuild fails; it is repopulated from the new pipeline on success.
+        builtBundleIndex = [:]
 
         let target: Dev?
         if let uid = overrideUID {
@@ -961,13 +1011,17 @@ final class Engine {
     }
 
     /// The roster to publish: the live "producing audio" list with each entry's
-    /// gain/muted overlaid from the active per-app override (default 100/false).
-    /// The roster itself stays override-agnostic; the overlay happens here so
-    /// status.json always echoes the applied value.
+    /// gain/muted overlaid from the active per-app override — but ONLY for apps
+    /// whose per-app tap the current pipeline actually BUILT. An app that fell
+    /// open to the master path (its tap failed to create, the aggregate/IOProc
+    /// build dropped it, or the pipeline is down) receives master-only gain, so
+    /// status.json must report the default 100/false for it, not the requested
+    /// override. builtBundleIndex is the authoritative set of applied taps.
     private func appsForStatus() -> [AppEntry] {
-        guard !control.apps.isEmpty else { return currentApps }
+        guard !builtBundleIndex.isEmpty else { return currentApps }
         return currentApps.map { entry in
-            guard let o = control.apps[entry.bundleID] else { return entry }
+            guard builtBundleIndex[entry.bundleID] != nil,
+                  let o = control.apps[entry.bundleID] else { return entry }
             var e = entry
             e.gain = o.gain
             e.muted = o.muted
