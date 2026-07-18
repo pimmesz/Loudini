@@ -80,6 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var daemon: Process?
     private var daemonRetryTimer: Timer?
     private var lastStatusRunning = false
+    /// Last roster seen from status.json, so the per-app section can be
+    /// re-rendered on menu-open against a freshly read control.json (CLI edits
+    /// to silent apps never move status.json, so the reset affordance would
+    /// otherwise go stale).
+    private var lastApps: [AppEntry] = []
     private var lastPipelineOK = false
     private var lastShownGain = 100
     private var lastShownMuted = false
@@ -354,6 +359,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             conflictItem.isHidden = true
         }
+        // Re-read control.json on open so overrides added/cleared from the CLI
+        // for a *silent* app (which never moves status.json, so statusChanged
+        // wouldn't fire) are reflected — chiefly the "Reset App Volumes" row's
+        // visibility, which is driven by control.json, not the roster.
+        renderApps(lastApps, hasOverrides: !ControlOps.current().apps.isEmpty)
     }
 
     // MARK: status.json -> UI (the visual layer; reacts to changes from ANY frontend)
@@ -403,7 +413,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Per-app rows reflect the daemon's roster; the reset affordance appears
         // whenever any override exists in control.json (even for a silent app).
-        renderApps(running ? status!.apps : [], hasOverrides: !control.apps.isEmpty)
+        lastApps = running ? status!.apps : []
+        renderApps(lastApps, hasOverrides: !control.apps.isEmpty)
 
         guard running else {
             lastLevel = nil

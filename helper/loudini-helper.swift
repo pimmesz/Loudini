@@ -1167,12 +1167,19 @@ enum LoudiniHelper {
     /// silent app); a name is matched case-insensitively over the live roster
     /// (exact name, then substring, then bundle-id substring). Falls back to
     /// treating a dotted token as a bundle id so a not-yet-playing app is still
-    /// addressable. nil when nothing plausibly matches.
+    /// addressable. nil when nothing plausibly matches. Roster hits with an
+    /// empty bundle id (bundle-less sources like raw CLI/helper audio) are
+    /// skipped — there's no stable key to write, so set/mute would silently
+    /// no-op on "".
     private static func resolveAppTarget(_ token: String, _ roster: [AppEntry]) -> String? {
-        if roster.contains(where: { $0.bundleID == token }) { return token }
+        if !token.isEmpty, roster.contains(where: { $0.bundleID == token }) { return token }
         let lower = token.lowercased()
-        if let hit = roster.first(where: { $0.name.lowercased() == lower }) { return hit.bundleID }
-        if let hit = roster.first(where: { $0.bundleID.lowercased() == lower }) { return hit.bundleID }
+        if let hit = roster.first(where: { $0.name.lowercased() == lower && !$0.bundleID.isEmpty }) {
+            return hit.bundleID
+        }
+        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.bundleID.lowercased() == lower }) {
+            return hit.bundleID
+        }
         if let hit = roster.first(where: { $0.name.lowercased().contains(lower) }),
            !hit.bundleID.isEmpty { return hit.bundleID }
         return token.contains(".") ? token : nil
