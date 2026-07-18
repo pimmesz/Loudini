@@ -1172,7 +1172,11 @@ enum LoudiniHelper {
     /// skipped — there's no stable key to write, so set/mute would silently
     /// no-op on "".
     private static func resolveAppTarget(_ token: String, _ roster: [AppEntry]) -> String? {
-        if !token.isEmpty, roster.contains(where: { $0.bundleID == token }) { return token }
+        // Reject the empty token up front. Without this, the fuzzy `.contains(lower)`
+        // passes below match every entry (`"x".contains("") == true`), so `app "" set`
+        // would silently address the first roster app instead of failing.
+        guard !token.isEmpty else { return nil }
+        if roster.contains(where: { $0.bundleID == token }) { return token }
         let lower = token.lowercased()
         // Every fuzzy pass skips bundle-less sources *inside* the predicate so it
         // keeps scanning to a later addressable match instead of stopping on the
