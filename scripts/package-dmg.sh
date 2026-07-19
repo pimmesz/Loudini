@@ -77,7 +77,7 @@ notarize() {
     if [ "${rc}" -eq 0 ]; then
       # Some notarytool versions exit 0 even on a terminal Invalid/Rejected. Surface Apple's
       # log here (instead of a cryptic downstream stapler failure) if the status is bad.
-      if printf '%s\n' "${out}" | grep -qE 'status: (Invalid|Rejected)'; then
+      if grep -qE 'status: (Invalid|Rejected)' <<<"${out}"; then
         echo "ERROR: notarization ${id} was not Accepted; Apple log follows:" >&2
         xcrun notarytool log "${id}" "${notary_auth[@]}" /dev/stdout 2>&1 || true
         return 1
@@ -85,7 +85,7 @@ notarize() {
       return 0
     fi
     waited=$((waited + 1))
-    if printf '%s\n' "${out}" | grep -q 'Timeout of .* reached' && [ "${waited}" -lt "${max_waits}" ]; then
+    if grep -q 'Timeout of .* reached' <<<"${out}" && [ "${waited}" -lt "${max_waits}" ]; then
       echo "   still processing on Apple's side; continuing to wait (${waited}/${max_waits})…" >&2
       continue
     fi
@@ -100,7 +100,13 @@ echo "==> building release app…"
 "${repo_dir}/menubar/build-app.sh"
 
 # --- 2. verify it really is Developer-ID signed (not ad-hoc / self-signed) ----
-if ! codesign -dvv "${app}" 2>&1 | grep -q "Authority=Developer ID Application"; then
+# Capture first (|| true), then match the string. Piping codesign into `grep -q` under
+# `set -o pipefail` makes the check hinge on codesign's exit code (SIGPIPE from grep -q's
+# early exit, or a transient non-zero right after signing) — which spuriously fails even
+# when the app IS Developer-ID signed. Matching the captured output depends only on the
+# Authority line being present, which is what we actually want to verify.
+app_sig="$(codesign -dvv "${app}" 2>&1 || true)"
+if ! grep -q "Authority=Developer ID Application" <<<"${app_sig}"; then
   echo "ERROR: ${app} is not Developer-ID signed — build-app.sh fell back to dev/ad-hoc signing." >&2
   exit 1
 fi
