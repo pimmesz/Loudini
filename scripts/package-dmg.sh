@@ -45,6 +45,52 @@ fi
 echo "signing identity: ${devid}"
 echo "notary auth:      ${notary_desc}"
 
+# --- notarize helper: ride ONE submission across bounded waits ----------------
+# Apple's notary queue is sometimes slow enough that a single --wait times out with
+# nothing wrong on our end (a build once sat "In Progress" for 30 min, then failed).
+# So submit once and keep waiting on the SAME submission instead of re-uploading or
+# giving up. A genuine rejection dumps Apple's log and fails fast; the total wait is
+# bounded (4x15m) so a real outage still fails in reasonable time.
+notarize() {
+  local file="$1" out rc id waited=0 max_waits=4 chunk=15m
+
+  set +e
+  out="$(xcrun notarytool submit "${file}" "${notary_auth[@]}" --no-wait 2>&1)"
+  rc=$?
+  set -e
+  printf '%s\n' "${out}"
+  [ "${rc}" -eq 0 ] || { echo "ERROR: notarytool submit failed (exit ${rc})." >&2; return "${rc}"; }
+  id="$(printf '%s\n' "${out}" | awk '/^ *id: /{print $2; exit}')"
+  [ -n "${id}" ] || { echo "ERROR: notarytool submit returned no submission id." >&2; return 1; }
+
+  echo "==> waiting for notarization ${id} (Apple queue can be slow)…"
+  while :; do
+    set +e
+    out="$(xcrun notarytool wait "${id}" "${notary_auth[@]}" --timeout "${chunk}" 2>&1)"
+    rc=$?
+    set -e
+    printf '%s\n' "${out}"
+    if [ "${rc}" -eq 0 ]; then
+      # Some notarytool versions exit 0 even on a terminal Invalid/Rejected. Surface Apple's
+      # log here (instead of a cryptic downstream stapler failure) if the status is bad.
+      if printf '%s\n' "${out}" | grep -qE 'status: (Invalid|Rejected)'; then
+        echo "ERROR: notarization ${id} was not Accepted; Apple log follows:" >&2
+        xcrun notarytool log "${id}" "${notary_auth[@]}" /dev/stdout 2>&1 || true
+        return 1
+      fi
+      return 0
+    fi
+    waited=$((waited + 1))
+    if printf '%s\n' "${out}" | grep -q 'Timeout of .* reached' && [ "${waited}" -lt "${max_waits}" ]; then
+      echo "   still processing on Apple's side; continuing to wait (${waited}/${max_waits})…" >&2
+      continue
+    fi
+    echo "ERROR: notarization ${id} did not succeed (exit ${rc}); Apple log follows:" >&2
+    xcrun notarytool log "${id}" "${notary_auth[@]}" /dev/stdout 2>&1 || true
+    return "${rc}"
+  done
+}
+
 # --- 1. build (build-app.sh auto-detects the Developer ID → release signing) --
 echo "==> building release app…"
 "${repo_dir}/menubar/build-app.sh"
@@ -60,7 +106,7 @@ codesign --verify --deep --strict --verbose=2 "${app}"
 mkdir -p "${dist}"
 echo "==> notarizing the app (uploads to Apple, takes a few minutes)…"
 ditto -c -k --keepParent "${app}" "${dist}/Loudini.zip"
-xcrun notarytool submit "${dist}/Loudini.zip" "${notary_auth[@]}" --wait --timeout 30m
+notarize "${dist}/Loudini.zip"
 xcrun stapler staple "${app}"
 rm -f "${dist}/Loudini.zip"
 
@@ -76,7 +122,7 @@ rm -rf "${stage}"
 # --- 5. sign + notarize + staple the DMG so it validates offline --------------
 echo "==> signing + notarizing the DMG…"
 codesign --force --timestamp --sign "${devid}" "${dmg}"
-xcrun notarytool submit "${dmg}" "${notary_auth[@]}" --wait --timeout 30m
+notarize "${dmg}"
 xcrun stapler staple "${dmg}"
 
 # stapler validate is reliable — let it abort the script if the DMG won't
