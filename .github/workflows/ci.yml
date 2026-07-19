@@ -1,0 +1,53 @@
+name: ci
+
+# Compile-check on every code push/PR so a broken main is caught before a release
+# is ever cut. No secrets needed: the app is ad-hoc signed here (build-app.sh falls
+# back automatically), which is all a build check requires. Fork PRs cannot access
+# secrets on GitHub — and this job needs none, so contributions build safely.
+on:
+  # NOTE: paths-ignore means a docs-only / Markdown-only change won't start this
+  # workflow — so do NOT make the app/plugin jobs *required* status checks while
+  # this filter is here, or a docs-only PR hangs forever at "Expected — waiting for
+  # status" (GitHub's path-filter + required-check trap). Fine as-is with no branch
+  # protection; if you add required checks, drop paths-ignore or add an always-pass gate.
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    # Apple Silicon runner with an SDK >= 14.4 — the daemon uses the 14.4-only
+    # Core Audio process-tap APIs (CATapDescription/AudioHardwareCreateProcessTap).
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Loudini.app (ad-hoc signed)
+        run: menubar/build-app.sh
+
+  plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: plugin/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build

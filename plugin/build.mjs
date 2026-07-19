@@ -17,9 +17,14 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node20',
-  // All paths here are absolute, so the working dir is irrelevant — except that
-  // esbuild switches to Yarn PnP resolution if any ancestor dir has a .pnp.cjs.
-  // Anchoring in the temp dir keeps resolution on node_modules everywhere.
+  // Minify the shipped bundle. Besides size, it strips esbuild's module-path
+  // comments and mangles the CommonJS registry keys — which, because the working
+  // dir is the temp dir (below), would otherwise embed the maintainer's absolute
+  // home path (../../Users/<name>/…) in plugin.js on every user's machine.
+  minify: true,
+  // Anchor in the temp dir so esbuild doesn't get pulled into a Yarn-PnP store
+  // an ancestor dir might have (this is a pnpm install; with the plugin root as
+  // the working dir esbuild switches to PnP resolution and can't find deps).
   absWorkingDir: tmpdir(),
   // Bundled CJS deps (ws) still call require() inside our ESM output.
   banner: {

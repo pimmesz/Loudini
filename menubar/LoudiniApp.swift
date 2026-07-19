@@ -641,7 +641,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         row.name.stringValue = a.name
         // Dim a lingering (idle) app so the live ones read first.
         row.name.textColor = a.active ? .labelColor : .secondaryLabelColor
-        row.icon.image = NSRunningApplication(processIdentifier: pid_t(a.pid))?.icon
+        // pid_t(exactly:) — never trap on an out-of-range pid; nil falls back.
+        row.icon.image = NSRunningApplication(processIdentifier: pid_t(exactly: a.pid) ?? -1)?.icon
             ?? NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil)
         // Don't fight the user's hand: skip the echo while this slider is dragged.
         if !(row.slider.cell?.isHighlighted ?? false) { row.slider.doubleValue = Double(a.gain) }

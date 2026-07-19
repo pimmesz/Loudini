@@ -336,3 +336,45 @@ Notes:
 - `loudini.entitlements` currently declares only `com.apple.security.device.audio-input` (for the audio
   tap under the hardened runtime). Verify at first notarization; add entitlements only if the runtime or
   `notarytool` log flags a specific denial.
+
+### CI / automated releases
+
+Two GitHub Actions workflows (`.github/workflows/`):
+
+- **`ci.yml`** — on every push to `main` and every PR, compiles `Loudini.app` (ad-hoc signed) on a
+  macOS runner and typechecks + builds the Stream Deck plugin on Linux. No secrets; fork PRs build
+  safely because GitHub never exposes secrets to them.
+- **`release.yml`** — on a `v*` tag push, imports your Developer ID cert into a throwaway keychain,
+  runs `scripts/package-dmg.sh` (which auto-detects the cert and uses credential-based notarization
+  via `NOTARY_APPLE_ID`/`NOTARY_TEAM_ID`/`NOTARY_APP_PW`), and publishes the signed+notarized
+  `Loudini.dmg` as a GitHub Release. The site's download button points at
+  `releases/latest/download/Loudini.dmg`, so it always resolves to the newest release.
+
+**One-time setup — five repository secrets** (Settings → Secrets and variables → Actions → New
+repository secret):
+
+```sh
+# 1. Export the Developer ID Application cert + private key to a .p12, then base64 it.
+#    (Keychain Access → your "Developer ID Application" cert → right-click → Export → .p12,
+#     set an export password; use that password as DEVELOPER_ID_CERT_PASSWORD below.)
+base64 -i DeveloperID.p12 | pbcopy      # paste as DEVELOPER_ID_CERT_P12
+```
+
+| Secret | Value |
+|---|---|
+| `DEVELOPER_ID_CERT_P12` | base64 of the exported `.p12` |
+| `DEVELOPER_ID_CERT_PASSWORD` | the password set during that export |
+| `APPLE_ID` | Apple ID email used for notarization |
+| `APPLE_TEAM_ID` | 10-char Developer Team ID (e.g. `24BDPF6PWJ`) |
+| `APPLE_APP_PASSWORD` | an app-specific password from appleid.apple.com |
+
+Cut a release: `git tag v0.3.0 && git push origin v0.3.0`. Watch it under the repo's Actions tab.
+
+Notes:
+- The signing cert lives in your GitHub secrets, so anyone with push access to `main` (or who can edit
+  a workflow) can use your Developer ID identity. Keep collaborators trusted, or protect `main` and
+  require review on workflow changes. The identity is revocable at developer.apple.com if ever leaked.
+- The runner is Apple Silicon, so the DMG is `arm64`-only — same as a local `build-app.sh` build.
+  Intel support would need a universal (`lipo`'d) build; not wired up.
+- Hardening option: pin the `actions/*` and `pnpm/action-setup` steps to full commit SHAs instead of
+  `@v4` tags.

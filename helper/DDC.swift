@@ -52,24 +52,43 @@ enum DDC {
         return out
     }
 
+    /// Hold an exclusive cross-process lock for a brightness read-modify-write,
+    /// so overlapping `loudini brightness` invocations (a held/autorepeated key —
+    /// the marketed hotkey path) don't collapse steps or drive concurrent I2C to
+    /// the same chip. Fail-open: proceed unlocked if the lock can't be taken.
+    private static func withLock<T>(_ body: () -> T) -> T {
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return body() }
+        defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
+        flock(fd, LOCK_EX)
+        return body()
+    }
+
+    /// Cached last-set percent, or nil if none yet.
+    private static func cachedPercent() -> Int? {
+        guard let data = try? Data(contentsOf: cacheURL),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let n = obj["percent"] as? NSNumber else { return nil }
+        return clampGain(n.intValue)
+    }
+
     /// Current brightness 0-100: the monitor's own value if it answers a read,
     /// else the cached last-set value, else 50.
-    static func current() -> Int {
+    static func current() -> Int { withLock { currentUnlocked() } }
+    private static func currentUnlocked() -> Int {
         if let av = services().first, let (cur, max) = readLuminance(av), max > 0 {
             return clampGain(Int((Double(cur) / Double(max) * 100).rounded()))
         }
-        if let data = try? Data(contentsOf: cacheURL),
-           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           let n = obj["percent"] as? NSNumber {
-            return clampGain(n.intValue)
-        }
-        return 50
+        return cachedPercent() ?? 50
     }
 
     /// Set 0-100 on every external display. Returns the applied value, or nil
     /// when there is nothing to control.
     @discardableResult
-    static func set(percent: Int) -> Int? {
+    static func set(percent: Int) -> Int? { withLock { applyUnlocked(percent) } }
+    @discardableResult
+    private static func applyUnlocked(_ percent: Int) -> Int? {
         let svcs = services()
         guard !svcs.isEmpty else { return nil }
         let pct = clampGain(percent)
@@ -90,7 +109,11 @@ enum DDC {
 
     @discardableResult
     static func nudge(_ delta: Int) -> Int? {
-        set(percent: current() + delta)
+        // Whole read-modify-write under one lock. Base the step on the cached
+        // last-set value (consistent under a held key), reading the monitor only
+        // when there's no cache yet — otherwise the latency-bound read lets
+        // overlapping presses collapse into one step.
+        withLock { applyUnlocked((cachedPercent() ?? currentUnlocked()) + delta) }
     }
 
     // MARK: DDC/CI over I2C (chip 0x37, register 0x51)

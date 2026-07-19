@@ -947,7 +947,11 @@ final class Engine {
     }
     private func readScalar(_ dev: AudioObjectID) -> Float? {
         var a = volumeAddr; var v: Float32 = 0; var s = UInt32(MemoryLayout<Float32>.size)
-        return AudioObjectGetPropertyData(dev, &a, 0, nil, &s, &v) == 0 ? v : nil
+        // Sanitize: a buggy/hostile HAL device could report NaN/Inf/out-of-range,
+        // which would trap Int((v*100).rounded()) at the callers. Reject non-finite,
+        // clamp to [0,1] so every downstream conversion is safe.
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &s, &v) == 0, v.isFinite else { return nil }
+        return min(1, max(0, v))
     }
     @discardableResult
     private func writeScalar(_ dev: AudioObjectID, _ value: Float) -> Bool {
@@ -966,6 +970,15 @@ final class Engine {
     private func softwareGain(_ c: Control) -> Float {
         masterViaScalar ? (c.muted ? 0 : 1) : c.multiplier
     }
+    /// Publish a new master gain to control.json WITHOUT clobbering a per-app
+    /// override a frontend wrote in the last poll window: re-read the file and
+    /// change only `gain`. The daemon owns the master; frontends own `apps`, so
+    /// writing our (up-to-one-poll-stale) whole snapshot would drop their edit.
+    private func publishGain(_ gain: Int) {
+        var merged = readControl(previous: control) ?? control
+        merged.gain = clampGain(gain)
+        try? writeControl(merged)
+    }
     /// An external device-volume change (the Touch Bar, another app): mirror it
     /// into control.json so every frontend and our own pipeline follow. The
     /// 100 ms control watcher then re-applies it through the normal path.
@@ -976,8 +989,7 @@ final class Engine {
         let g = clampGain(Int((s * 100).rounded()))
         guard g != control.gain else { return }
         lastAppliedScalar = s   // pre-claim so the resulting write→apply→writeScalar echo is ignored
-        var c = control; c.gain = g
-        try? writeControl(c)
+        publishGain(g)
         log("device volume changed externally (e.g. Touch Bar) -> gain=\(g)")
     }
 
@@ -1094,7 +1106,7 @@ final class Engine {
             scheduleShapeLog(for: p)
             // If we adopted the device's own volume, sync control.json so every
             // frontend shows that level (our watcher re-applying it is a no-op).
-            if masterViaScalar { try? writeControl(control) }
+            if masterViaScalar { publishGain(control.gain) }
             publishStatus()
         } catch {
             log("rebuild(\(reason)) failed: \(error.localizedDescription) — audio untouched (fail-open), retrying in 2s")

@@ -125,9 +125,13 @@ private func parseApps(_ raw: Any?) -> [AppEntry] {
     // entire roster — true lenient parse.
     return rows.compactMap { row -> AppEntry? in
         guard let r = row as? [String: Any] else { return nil }
+        // Bound the pid to the valid pid_t range — an out-of-range value from a
+        // corrupt/hostile file would trap pid_t() at the menu-bar sink.
+        let rawPid = (r["pid"] as? NSNumber)?.intValue ?? 0
+        let pid = (0...Int(pid_t.max)).contains(rawPid) ? rawPid : 0
         return AppEntry(bundleID: r["bundleID"] as? String ?? "",
                  name: r["name"] as? String ?? "",
-                 pid: (r["pid"] as? NSNumber)?.intValue ?? 0,
+                 pid: pid,
                  gain: clampGain((r["gain"] as? NSNumber)?.intValue ?? 100),
                  muted: r["muted"] as? Bool ?? false,
                  active: r["active"] as? Bool ?? true)

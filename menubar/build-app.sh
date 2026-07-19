@@ -7,17 +7,23 @@ repo_dir="$(cd "${menubar_dir}/.." && pwd)"
 helper="${repo_dir}/helper/loudini-helper"
 app="${menubar_dir}/Loudini.app"
 
+# Pin the binary's minimum OS to Info.plist's LSMinimumSystemVersion (14.4) via an
+# explicit -target. Without it, swiftc stamps the *build host's* OS as the floor, so
+# a build on a newer macOS (the CI runner, or a dev on 15.x) would refuse to launch
+# on 14.4–14.x. swiftc ignores MACOSX_DEPLOYMENT_TARGET, so -target is the only way.
+target="$(uname -m)-apple-macos14.4"
+
 # Always (re)build the engine first — one command builds everything, and the
 # bundled daemon can never go stale relative to the sources.
 echo "building loudini-helper (daemon + CLI)…"
-(cd "${repo_dir}/helper" && swiftc -O -parse-as-library -o loudini-helper \
+(cd "${repo_dir}/helper" && swiftc -O -parse-as-library -target "${target}" -o loudini-helper \
   loudini-helper.swift ControlFile.swift DDC.swift \
   -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit)
 
 rm -rf "${app:?}"
 mkdir -p "${app}/Contents/MacOS"
 
-swiftc -O -parse-as-library \
+swiftc -O -parse-as-library -target "${target}" \
   -o "${app}/Contents/MacOS/Loudini" \
   "${menubar_dir}/LoudiniApp.swift" \
   "${menubar_dir}/VolumeKeyTap.swift" \

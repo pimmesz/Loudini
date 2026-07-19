@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Build a notarized, stapled Loudini.dmg for 1-click install — the whole
+# release pipeline: build (release-signed) → notarize the app → staple → make
+# the DMG (drag-to-Applications) → sign + notarize + staple the DMG.
+#
+# One-time setup first (see BUILD.md → Release signing & notarization):
+#   1. A "Developer ID Application" cert in your login keychain.
+#   2. A notarytool credential profile:
+#        xcrun notarytool store-credentials loudini \
+#          --apple-id you@example.com --team-id TEAMID --password <app-specific-pw>
+#      (override the profile name with NOTARY_PROFILE=... )
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_dir="$(cd "${script_dir}/.." && pwd)"
+app="${repo_dir}/menubar/Loudini.app"
+dist="${repo_dir}/dist"
+dmg="${dist}/Loudini.dmg"
+profile="${NOTARY_PROFILE:-loudini}"
+
+# --- preflight: the two things only you can set up ---------------------------
+devid="$(security find-identity -v -p codesigning 2>/dev/null \
+         | grep -o 'Developer ID Application: [^"]*' | head -1 || true)"
+if [[ -z "${devid}" ]]; then
+  echo "ERROR: no 'Developer ID Application' cert in the keychain." >&2
+  echo "       Install it (Xcode → Settings → Accounts → Manage Certificates → + Developer ID Application)." >&2
+  exit 1
+fi
+
+# Notary auth: direct App Store Connect credentials via env (CI), else a stored
+# notarytool keychain profile (the local default).
+if [[ -n "${NOTARY_APPLE_ID:-}" && -n "${NOTARY_TEAM_ID:-}" && -n "${NOTARY_APP_PW:-}" ]]; then
+  notary_auth=(--apple-id "${NOTARY_APPLE_ID}" --team-id "${NOTARY_TEAM_ID}" --password "${NOTARY_APP_PW}")
+  notary_desc="App Store Connect credentials (env)"
+else
+  notary_auth=(--keychain-profile "${profile}")
+  notary_desc="keychain profile '${profile}'"
+  if ! xcrun notarytool history --keychain-profile "${profile}" >/dev/null 2>&1; then
+    echo "ERROR: notarytool profile '${profile}' not found." >&2
+    echo "       Run: xcrun notarytool store-credentials ${profile} --apple-id <you> --team-id <TEAMID> --password <app-specific-pw>" >&2
+    echo "       (or set NOTARY_APPLE_ID / NOTARY_TEAM_ID / NOTARY_APP_PW for credential auth)." >&2
+    exit 1
+  fi
+fi
+echo "signing identity: ${devid}"
+echo "notary auth:      ${notary_desc}"
+
+# --- 1. build (build-app.sh auto-detects the Developer ID → release signing) --
+echo "==> building release app…"
+"${repo_dir}/menubar/build-app.sh"
+
+# --- 2. verify it really is Developer-ID signed (not ad-hoc / self-signed) ----
+if ! codesign -dvv "${app}" 2>&1 | grep -q "Authority=Developer ID Application"; then
+  echo "ERROR: ${app} is not Developer-ID signed — build-app.sh fell back to dev/ad-hoc signing." >&2
+  exit 1
+fi
+codesign --verify --deep --strict --verbose=2 "${app}"
+
+# --- 3. notarize the app ------------------------------------------------------
+mkdir -p "${dist}"
+echo "==> notarizing the app (uploads to Apple, takes a few minutes)…"
+ditto -c -k --keepParent "${app}" "${dist}/Loudini.zip"
+xcrun notarytool submit "${dist}/Loudini.zip" "${notary_auth[@]}" --wait --timeout 30m
+xcrun stapler staple "${app}"
+rm -f "${dist}/Loudini.zip"
+
+# --- 4. make the DMG (drag-to-Applications) -----------------------------------
+echo "==> building the DMG…"
+stage="$(mktemp -d)"
+cp -R "${app}" "${stage}/"
+ln -s /Applications "${stage}/Applications"
+rm -f "${dmg}"
+hdiutil create -volname "Loudini" -srcfolder "${stage}" -ov -format UDZO "${dmg}" >/dev/null
+rm -rf "${stage}"
+
+# --- 5. sign + notarize + staple the DMG so it validates offline --------------
+echo "==> signing + notarizing the DMG…"
+codesign --force --timestamp --sign "${devid}" "${dmg}"
+xcrun notarytool submit "${dmg}" "${notary_auth[@]}" --wait --timeout 30m
+xcrun stapler staple "${dmg}"
+
+# stapler validate is reliable — let it abort the script if the DMG won't
+# validate offline. spctl is advisory (flaky in some environments) so warn only.
+xcrun stapler validate "${dmg}"
+spctl -a -t open --context context:primary-signature "${dmg}" || echo "  (spctl assessment inconclusive — verify manually before publishing)"
+echo
+echo "✅ ${dmg}"
+echo
+echo "Publish it:  gh release create v0.2.0 \"${dmg}\" --title \"Loudini v0.2.0\" --notes \"…\""
