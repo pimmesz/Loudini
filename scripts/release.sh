@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# OPTIONAL escape hatch — cut a release from YOUR Mac. Normally you just bump
-# menubar/Info.plist and push to main, and CI (release.yml) auto-builds + notarizes +
-# publishes. Reach for this only if that CI release FAILS (e.g. an Apple notary
-# outage) and you want to build + notarize + staple + publish the same version
-# yourself — babysit or Ctrl-C the notary wait, no macOS-runner minutes. It bails if
-# the version is already published and refuses a foreign/stale draft, so it's safe.
+# Cut a Loudini release from YOUR Mac — THE release path. Build + notarize + staple +
+# publish the current menubar/Info.plist version as a GitHub Release. Releases are
+# local-only: the release.yml workflow is a dormant manual (workflow_dispatch) fallback,
+# not auto-triggered. Re-running is safe — it bails if the version is already published
+# and refuses a foreign/stale draft. Babysit or Ctrl-C the Apple notary wait.
 #
 # One-time prereqs (see BUILD.md -> Release signing & notarization):
 #   - a "Developer ID Application" cert in your login keychain

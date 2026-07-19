@@ -1,11 +1,10 @@
 name: release
 
-# Version-bump auto-release. When a push to main lands a NEW app version
-# (menubar/Info.plist CFBundleShortVersionString that has no release yet), CI cuts
-# it: build -> sign -> notarize -> publish Loudini.dmg as a GitHub Release tagged
-# vX.Y.Z. Bumping the version IS the "ship it" action — there is no manual tagging.
-# Ordinary commits (version unchanged) do nothing but a cheap version check.
-# (scripts/release.sh is an optional local alternative — see BUILD.md.)
+# Manual (dormant) cloud release. Releases are cut LOCALLY with scripts/release.sh; this
+# workflow only runs on demand (Actions -> release -> Run workflow) as a cloud fallback.
+# A cheap Linux check reads the Info.plist version and, if it has no published release yet
+# (and isn't a downgrade), a macOS job builds -> sign -> notarize -> publish Loudini.dmg
+# as a GitHub Release tagged vX.Y.Z.
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   DEVELOPER_ID_CERT_P12        base64 of your exported "Developer ID Application" .p12
@@ -15,9 +14,9 @@ name: release
 #   APPLE_APP_PASSWORD           an app-specific password (appleid.apple.com) for notarytool
 # See BUILD.md -> "CI / automated releases".
 on:
-  push:
-    branches: [main]
-  workflow_dispatch: {}   # manual "release the current Info.plist version if it isn't yet"
+  # Dormant cloud fallback — releases are cut locally via scripts/release.sh. Trigger this
+  # manually (Actions -> release -> Run workflow) to build the current version in the cloud.
+  workflow_dispatch: {}
 
 permissions:
   contents: write   # create the release + tag and upload the DMG asset
