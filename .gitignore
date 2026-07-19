@@ -3,6 +3,8 @@
 helper/loudini-helper
 menubar/Loudini.app/
 menubar/AppIcon.iconset/
+# release build output (Loudini.dmg / Loudini.zip)
+dist/
 
 # pnpm project — npm lockfiles must never be committed
 package-lock.json

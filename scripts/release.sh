@@ -19,6 +19,10 @@ repo_dir="$(cd "${script_dir}/.." && pwd)"
 dmg="${repo_dir}/dist/Loudini.dmg"
 cd "${repo_dir}"
 
+# Timestamped, elapsed-time logging so you can see how long each phase takes.
+_t0=$SECONDS
+log() { printf '[%s +%2dm%02ds] %s\n' "$(date +%H:%M:%S)" "$(( (SECONDS-_t0)/60 ))" "$(( (SECONDS-_t0)%60 ))" "$*"; }
+
 # --- preflight: on main, clean, and pushed --------------------------------------
 # The release tag must point at a commit that exists on origin, so HEAD has to be
 # the pushed tip of main before we publish.
@@ -72,7 +76,7 @@ if [ -n "${ref}" ]; then
   fi
 fi
 
-echo "==> building + notarizing Loudini v${version} (Apple's notary wait happens here; Ctrl-C is safe)…"
+log "cutting release v${version} — building + notarizing (per-phase timing below; Ctrl-C is safe)…"
 "${script_dir}/package-dmg.sh"
 
 # Release notes = this version's CHANGELOG section, if present.
@@ -86,6 +90,7 @@ awk -v ver="${version}" '
 [ -s "${notes}" ] || echo "Signed & notarized build. See CHANGELOG.md." > "${notes}"
 
 # Fresh create, or resume a stuck DRAFT from a prior failed run.
+log "publishing v${version} to GitHub…"
 if gh release view "v${version}" >/dev/null 2>&1; then
   # Only resume OUR stuck draft AT THIS COMMIT. Anything else — a published release, or a
   # draft whose target is a different commit (stale after a same-version fix, or a concurrent
@@ -106,4 +111,4 @@ else
     --notes-file "${notes}"
 fi
 
-echo "✅ published: https://github.com/pimmesz/Loudini/releases/tag/v${version}"
+log "✅ published v${version} in $(( (SECONDS - _t0) / 60 ))m: https://github.com/pimmesz/Loudini/releases/tag/v${version}"
