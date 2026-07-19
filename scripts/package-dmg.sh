@@ -28,8 +28,12 @@ if [[ -z "${devid}" ]]; then
 fi
 
 # Notary auth: direct App Store Connect credentials via env (CI), else a stored
-# notarytool keychain profile (the local default).
-if [[ -n "${NOTARY_APPLE_ID:-}" && -n "${NOTARY_TEAM_ID:-}" && -n "${NOTARY_APP_PW:-}" ]]; then
+# notarytool keychain profile (the local default). Skipped entirely under SKIP_NOTARIZE
+# — a build+sign check needs a signing cert but no notary credentials.
+if [ -n "${SKIP_NOTARIZE:-}" ]; then
+  notary_auth=()
+  notary_desc="(SKIP_NOTARIZE — no notarization)"
+elif [[ -n "${NOTARY_APPLE_ID:-}" && -n "${NOTARY_TEAM_ID:-}" && -n "${NOTARY_APP_PW:-}" ]]; then
   notary_auth=(--apple-id "${NOTARY_APPLE_ID}" --team-id "${NOTARY_TEAM_ID}" --password "${NOTARY_APP_PW}")
   notary_desc="App Store Connect credentials (env)"
 else
@@ -102,13 +106,17 @@ if ! codesign -dvv "${app}" 2>&1 | grep -q "Authority=Developer ID Application";
 fi
 codesign --verify --deep --strict --verbose=2 "${app}"
 
-# --- 3. notarize the app ------------------------------------------------------
+# --- 3. notarize the app (SKIP_NOTARIZE=1 → build+sign check only) -------------
 mkdir -p "${dist}"
-echo "==> notarizing the app (uploads to Apple, takes a few minutes)…"
-ditto -c -k --keepParent "${app}" "${dist}/Loudini.zip"
-notarize "${dist}/Loudini.zip"
-xcrun stapler staple "${app}"
-rm -f "${dist}/Loudini.zip"
+if [ -z "${SKIP_NOTARIZE:-}" ]; then
+  echo "==> notarizing the app (uploads to Apple, takes a few minutes)…"
+  ditto -c -k --keepParent "${app}" "${dist}/Loudini.zip"
+  notarize "${dist}/Loudini.zip"
+  xcrun stapler staple "${app}"
+  rm -f "${dist}/Loudini.zip"
+else
+  echo "==> SKIP_NOTARIZE set — skipping app notarization + staple."
+fi
 
 # --- 4. make the DMG (drag-to-Applications) -----------------------------------
 echo "==> building the DMG…"
@@ -119,16 +127,20 @@ rm -f "${dmg}"
 hdiutil create -volname "Loudini" -srcfolder "${stage}" -ov -format UDZO "${dmg}" >/dev/null
 rm -rf "${stage}"
 
-# --- 5. sign + notarize + staple the DMG so it validates offline --------------
-echo "==> signing + notarizing the DMG…"
+# --- 5. sign (+ notarize + staple) the DMG so it validates offline -------------
+echo "==> signing the DMG…"
 codesign --force --timestamp --sign "${devid}" "${dmg}"
-notarize "${dmg}"
-xcrun stapler staple "${dmg}"
-
-# stapler validate is reliable — let it abort the script if the DMG won't
-# validate offline. spctl is advisory (flaky in some environments) so warn only.
-xcrun stapler validate "${dmg}"
-spctl -a -t open --context context:primary-signature "${dmg}" || echo "  (spctl assessment inconclusive — verify manually before publishing)"
+if [ -z "${SKIP_NOTARIZE:-}" ]; then
+  echo "==> notarizing the DMG…"
+  notarize "${dmg}"
+  xcrun stapler staple "${dmg}"
+  # stapler validate is reliable — let it abort the script if the DMG won't
+  # validate offline. spctl is advisory (flaky in some environments) so warn only.
+  xcrun stapler validate "${dmg}"
+  spctl -a -t open --context context:primary-signature "${dmg}" || echo "  (spctl assessment inconclusive — verify manually before publishing)"
+else
+  echo "==> SKIP_NOTARIZE set — built + Developer-ID-signed ${dmg} (not notarized)."
+fi
 echo
 echo "✅ ${dmg}"
 echo

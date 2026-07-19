@@ -341,20 +341,24 @@ Notes:
 
 Two GitHub Actions workflows (`.github/workflows/`):
 
-- **`ci.yml`** — on every push to `main` and every PR, compiles `Loudini.app` (ad-hoc signed) on a
-  macOS runner and typechecks + builds the Stream Deck plugin on Linux. No secrets; fork PRs build
-  safely because GitHub never exposes secrets to them.
-- **`release.yml`** — **version-bump auto-release.** A cheap Linux `check` job reads
-  `CFBundleShortVersionString` from `menubar/Info.plist`; if that version has no release yet (and
-  isn't a downgrade), a macOS `release` job imports your Developer ID cert into a throwaway keychain,
-  runs `scripts/package-dmg.sh` (auto-detects the cert; notarizes via credentials in
-  `NOTARY_APPLE_ID`/`NOTARY_TEAM_ID`/`NOTARY_APP_PW`), and publishes the signed+notarized
+- **`ci.yml`** — on every push to `main` and every PR. On a PR (incl. forks, which get no secrets) it
+  ad-hoc-compiles `Loudini.app` on a macOS runner; on a push to `main` it instead does the real
+  Developer-ID build + DMG signing via `scripts/package-dmg.sh` with `SKIP_NOTARIZE=1` (skips only
+  Apple's notary wait), so packaging/signing breakage is caught before a release is ever cut. Both
+  also typecheck + build the Stream Deck plugin on Linux.
+- **`release.yml`** — **version-bump auto-release.** On every push to `main`, a cheap Linux `check`
+  job reads `CFBundleShortVersionString` from `menubar/Info.plist`; if that version has no published
+  release yet (and isn't a downgrade), a macOS `release` job imports your Developer ID cert into a
+  throwaway keychain, runs `scripts/package-dmg.sh` (auto-detects the cert; notarizes via credentials
+  in `NOTARY_APPLE_ID`/`NOTARY_TEAM_ID`/`NOTARY_APP_PW`), and publishes the signed+notarized
   `Loudini.dmg` as a GitHub Release tagged `vX.Y.Z`. Ordinary commits do nothing but the version
-  check. The site's download button points at `releases/latest/download/Loudini.dmg`, so it always
-  resolves to the newest release.
+  check. `workflow_dispatch` is a manual re-run. The site's download button points at
+  `releases/latest/download/Loudini.dmg`, so it always resolves to the newest release.
 
 **One-time setup — five repository secrets** (Settings → Secrets and variables → Actions → New
-repository secret):
+repository secret). CI uses these to Developer-ID-sign on pushes to `main` and to notarize a release;
+the local `scripts/release.sh` escape hatch does NOT use them — it signs with your keychain cert and
+notarizes via your `loudini` notarytool profile:
 
 ```sh
 # 1. Export the Developer ID Application cert + private key to a .p12, then base64 it.
@@ -371,9 +375,14 @@ base64 -i DeveloperID.p12 | pbcopy      # paste as DEVELOPER_ID_CERT_P12
 | `APPLE_TEAM_ID` | 10-char Developer Team ID (e.g. `24BDPF6PWJ`) |
 | `APPLE_APP_PASSWORD` | an app-specific password from appleid.apple.com |
 
-Cut a release: bump `CFBundleShortVersionString` in `menubar/Info.plist` (e.g. `0.2.0` -> `0.3.0`) and
-push to `main` — CI notarizes and publishes it. (Bump the plugin's `package.json` + manifest versions
-too, for consistency.) Watch it under the repo's Actions tab; `workflow_dispatch` is a manual re-run.
+Cut a release: bump `CFBundleShortVersionString` in `menubar/Info.plist` (e.g. `0.2.0` -> `0.3.0`) —
+and the plugin's `package.json` + manifest versions, for consistency — then commit and `git push
+origin main`. CI notarizes and publishes it; ordinary commits do nothing. Watch it under the repo's
+Actions tab.
+
+Escape hatch — if a CI release fails (e.g. an Apple notary outage) and you want to build it yourself,
+run `scripts/release.sh` on your Mac: it builds + notarizes + staples + publishes the same version
+(babysit / Ctrl-C the notary wait, no runner minutes) and bails if the version is already published.
 
 Notes:
 - The signing cert lives in your GitHub secrets, so anyone with push access to `main` (or who can edit

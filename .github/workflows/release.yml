@@ -5,6 +5,7 @@ name: release
 # it: build -> sign -> notarize -> publish Loudini.dmg as a GitHub Release tagged
 # vX.Y.Z. Bumping the version IS the "ship it" action — there is no manual tagging.
 # Ordinary commits (version unchanged) do nothing but a cheap version check.
+# (scripts/release.sh is an optional local alternative — see BUILD.md.)
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   DEVELOPER_ID_CERT_P12        base64 of your exported "Developer ID Application" .p12
@@ -181,12 +182,13 @@ jobs:
           # published. gh release create uploads as a draft then flips draft=false, so a
           # failure mid-publish can leave a stuck draft; don't mask that behind a blind ||.
           if gh release view "v$VERSION" >/dev/null 2>&1; then
-            # A release object already exists. It is only legitimately ours if it is the
-            # stuck DRAFT from a prior failed run of THIS workflow — resume that. A PUBLISHED
-            # release appearing after the guard means a concurrent/external publish; don't
-            # clobber it, fail red.
-            if [ "$(gh release view "v$VERSION" --json isDraft --jq '.isDraft')" != "true" ]; then
-              echo "::error::v$VERSION was published by another actor after the guard — refusing to overwrite it."
+            # Only resume OUR stuck draft AT THIS COMMIT. A published release, or a draft whose
+            # target is a different commit (a stale re-dispatch, or a concurrent local run),
+            # could publish a tag that doesn't match this DMG's source — refuse, don't clobber.
+            rel_draft="$(gh release view "v$VERSION" --json isDraft --jq '.isDraft')"
+            rel_target="$(gh release view "v$VERSION" --json targetCommitish --jq '.targetCommitish')"
+            if [ "$rel_draft" != "true" ] || [ "$rel_target" != "$GITHUB_SHA" ]; then
+              echo "::error::a v$VERSION release already exists (draft=$rel_draft, target=$rel_target) that isn't this commit — delete it and re-run."
               exit 1
             fi
             gh release upload "v$VERSION" dist/Loudini.dmg --clobber
