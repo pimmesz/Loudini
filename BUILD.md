@@ -344,11 +344,14 @@ Two GitHub Actions workflows (`.github/workflows/`):
 - **`ci.yml`** — on every push to `main` and every PR, compiles `Loudini.app` (ad-hoc signed) on a
   macOS runner and typechecks + builds the Stream Deck plugin on Linux. No secrets; fork PRs build
   safely because GitHub never exposes secrets to them.
-- **`release.yml`** — on a `v*` tag push, imports your Developer ID cert into a throwaway keychain,
-  runs `scripts/package-dmg.sh` (which auto-detects the cert and uses credential-based notarization
-  via `NOTARY_APPLE_ID`/`NOTARY_TEAM_ID`/`NOTARY_APP_PW`), and publishes the signed+notarized
-  `Loudini.dmg` as a GitHub Release. The site's download button points at
-  `releases/latest/download/Loudini.dmg`, so it always resolves to the newest release.
+- **`release.yml`** — **version-bump auto-release.** A cheap Linux `check` job reads
+  `CFBundleShortVersionString` from `menubar/Info.plist`; if that version has no release yet (and
+  isn't a downgrade), a macOS `release` job imports your Developer ID cert into a throwaway keychain,
+  runs `scripts/package-dmg.sh` (auto-detects the cert; notarizes via credentials in
+  `NOTARY_APPLE_ID`/`NOTARY_TEAM_ID`/`NOTARY_APP_PW`), and publishes the signed+notarized
+  `Loudini.dmg` as a GitHub Release tagged `vX.Y.Z`. Ordinary commits do nothing but the version
+  check. The site's download button points at `releases/latest/download/Loudini.dmg`, so it always
+  resolves to the newest release.
 
 **One-time setup — five repository secrets** (Settings → Secrets and variables → Actions → New
 repository secret):
@@ -368,7 +371,9 @@ base64 -i DeveloperID.p12 | pbcopy      # paste as DEVELOPER_ID_CERT_P12
 | `APPLE_TEAM_ID` | 10-char Developer Team ID (e.g. `24BDPF6PWJ`) |
 | `APPLE_APP_PASSWORD` | an app-specific password from appleid.apple.com |
 
-Cut a release: `git tag v0.3.0 && git push origin v0.3.0`. Watch it under the repo's Actions tab.
+Cut a release: bump `CFBundleShortVersionString` in `menubar/Info.plist` (e.g. `0.2.0` -> `0.3.0`) and
+push to `main` — CI notarizes and publishes it. (Bump the plugin's `package.json` + manifest versions
+too, for consistency.) Watch it under the repo's Actions tab; `workflow_dispatch` is a manual re-run.
 
 Notes:
 - The signing cert lives in your GitHub secrets, so anyone with push access to `main` (or who can edit

@@ -1,9 +1,10 @@
 name: release
 
-# Cut a signed, notarized, stapled Loudini.dmg and publish it as a GitHub Release
-# whenever a v* tag is pushed. The "Download for macOS" button on loudini.app points
-# at this release's asset via the stable URL:
-#   https://github.com/pimmesz/Loudini/releases/latest/download/Loudini.dmg
+# Version-bump auto-release. When a push to main lands a NEW app version
+# (menubar/Info.plist CFBundleShortVersionString that has no release yet), CI cuts
+# it: build -> sign -> notarize -> publish Loudini.dmg as a GitHub Release tagged
+# vX.Y.Z. Bumping the version IS the "ship it" action — there is no manual tagging.
+# Ordinary commits (version unchanged) do nothing but a cheap version check.
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   DEVELOPER_ID_CERT_P12        base64 of your exported "Developer ID Application" .p12
@@ -11,21 +12,125 @@ name: release
 #   APPLE_ID                     Apple ID email used for notarization
 #   APPLE_TEAM_ID                your 10-char Developer Team ID
 #   APPLE_APP_PASSWORD           an app-specific password (appleid.apple.com) for notarytool
-# See BUILD.md -> "CI / automated releases" for the exact export commands.
+# See BUILD.md -> "CI / automated releases".
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch: {}   # manual "release the current Info.plist version if it isn't yet"
 
 permissions:
-  contents: write   # create the release and upload the DMG asset
+  contents: write   # create the release + tag and upload the DMG asset
 
 jobs:
+  # Cheap gate: decide whether this commit introduces a new, releasable version.
+  # Runs on Linux so ordinary commits never spin up a macOS runner.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      should_release: ${{ steps.decide.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import plistlib; print(plistlib.load(open('menubar/Info.plist','rb'))['CFBundleShortVersionString'])")"
+          echo "Info.plist version: $version"
+
+          # Only ever release a strict N.N.N version. A typo'd or pre-release string
+          # (e.g. 0.3.0-beta) sorts as "newer" and would otherwise publish an off-scheme
+          # release — fail loudly instead of shipping a bad tag.
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::CFBundleShortVersionString '$version' is not a strict N.N.N version — refusing to release."
+            exit 1
+          fi
+
+          # One authoritative list of PUBLISHED release tags (paginated, no cap; drafts
+          # excluded so a stuck draft from a failed run never counts as "released" and
+          # blocks a retry). If this API call fails, set -e aborts the job (fail closed)
+          # rather than guessing "no release yet" and clobbering a real release.
+          tags="$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq '.[] | select(.draft == false) | .tag_name')"
+
+          # Already released this exact version? Then this is an ordinary commit.
+          if printf '%s\n' "$tags" | grep -qxF "v$version"; then
+            echo "release v$version already exists — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Downgrade guard: among real vN.N.N tags only, release just when this is the
+          # highest — so a typo'd/lower number (or a non-version tag like 'nightly')
+          # can't publish over a newer release as 'latest'.
+          highest="$(printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -1 || true)"
+          if [ -n "$highest" ] && [ "$(printf '%s\n%s\n' "$version" "$highest" | sort -V | tail -1)" != "$version" ]; then
+            echo "version $version is lower than the latest release $highest — skipping (looks like a mistake)."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "new version $version — will release."
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
     runs-on: macos-15
+    # Per-VERSION serialization: two runs of the SAME new version queue (never clobber
+    # each other's asset), but different versions get different groups so a newer push
+    # can never cancel a pending release of an earlier version.
+    concurrency:
+      group: release-${{ needs.check.outputs.version }}
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
+      # After acquiring the per-version slot, a concurrent run may have just published
+      # this version — re-check and skip the (expensive) build + notarize if so.
+      - name: Skip if this version was published while we queued
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Fail-closed like the check job: an API error aborts (job goes red, retryable)
+          # rather than assuming "not released" and clobbering a real release's asset.
+          # Published-only (drafts excluded), matching the check job.
+          tags="$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq '.[] | select(.draft == false) | .tag_name')"
+          if printf '%s\n' "$tags" | grep -qxF "v$VERSION"; then
+            echo "v$VERSION already released by a concurrent run — nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Not released yet. Make sure publishing won't MISPOINT the tag: gh ignores
+          # --target when a tag already exists, so a pre-existing v$VERSION tag at a
+          # DIFFERENT commit would tag/publish the wrong source. Resolve any exact tag and
+          # refuse only on a commit mismatch — a tag already at THIS commit (e.g. a stuck
+          # draft being recovered) is fine. matching-refs returns 200 + [] when the tag is
+          # absent, so a genuine "no tag" is distinct from a transient API error: the latter
+          # trips set -e and fails the job CLOSED (retryable) instead of proceeding blind.
+          # (VERSION is a validated N.N.N string, so splicing it into jq is safe.)
+          ref="$(gh api "repos/{owner}/{repo}/git/matching-refs/tags/v$VERSION" \
+            --jq '.[] | select(.ref == "refs/tags/v'"$VERSION"'") | "\(.object.type) \(.object.sha)"')"
+          if [ -n "$ref" ]; then
+            tag_sha="${ref##* }"
+            # Annotated tags point at a tag object; dereference to the commit it wraps.
+            if [ "${ref%% *}" = "tag" ]; then
+              tag_sha="$(gh api "repos/{owner}/{repo}/git/tags/$tag_sha" --jq '.object.sha')"
+            fi
+            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::tag v$VERSION already exists at $tag_sha but this run is $GITHUB_SHA — refusing to mispoint the release."
+              exit 1
+            fi
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
       - name: Import the Developer ID cert into a temporary keychain
+        if: steps.guard.outputs.proceed == 'true'
         env:
           CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
@@ -49,23 +154,58 @@ jobs:
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | sed 's/"//g')
 
       - name: Build -> notarize -> DMG (same script as local; credential auth via env)
+        if: steps.guard.outputs.proceed == 'true'
         env:
           NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
           NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           NOTARY_APP_PW: ${{ secrets.APPLE_APP_PASSWORD }}
         run: scripts/package-dmg.sh
 
-      - name: Publish the GitHub Release with the DMG attached
+      - name: Publish the GitHub Release (creates the vX.Y.Z tag at this commit)
+        if: steps.guard.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Idempotent: re-running the same tag updates the asset instead of failing.
-          gh release create "$GITHUB_REF_NAME" dist/Loudini.dmg \
-            --title "Loudini $GITHUB_REF_NAME" \
-            --notes "Signed & notarized build. See CHANGELOG.md for what changed." \
-            --verify-tag \
-          || gh release upload "$GITHUB_REF_NAME" dist/Loudini.dmg --clobber
+          # Release notes = this version's CHANGELOG section, if present.
+          notes="$RUNNER_TEMP/notes.md"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            /^## \[/ { flag=0 }
+            flag { print }
+          ' CHANGELOG.md > "$notes" || true
+          [ -s "$notes" ] || echo "Signed & notarized build. See CHANGELOG.md." > "$notes"
+
+          # Create the release (+asset) fresh, OR — idempotent re-run / stuck draft from a
+          # prior failed run — attach our asset to the existing one and make sure it is
+          # published. gh release create uploads as a draft then flips draft=false, so a
+          # failure mid-publish can leave a stuck draft; don't mask that behind a blind ||.
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            # A release object already exists. It is only legitimately ours if it is the
+            # stuck DRAFT from a prior failed run of THIS workflow — resume that. A PUBLISHED
+            # release appearing after the guard means a concurrent/external publish; don't
+            # clobber it, fail red.
+            if [ "$(gh release view "v$VERSION" --json isDraft --jq '.isDraft')" != "true" ]; then
+              echo "::error::v$VERSION was published by another actor after the guard — refusing to overwrite it."
+              exit 1
+            fi
+            gh release upload "v$VERSION" dist/Loudini.dmg --clobber
+            gh release edit "v$VERSION" --draft=false
+          else
+            gh release create "v$VERSION" dist/Loudini.dmg \
+              --target "$GITHUB_SHA" \
+              --title "Loudini v$VERSION" \
+              --notes-file "$notes"
+          fi
+
+          # Post-condition: a PUBLISHED (non-draft) release with the DMG attached. Fail
+          # red if not, so a stuck draft can never pass as a green release.
+          is_draft="$(gh release view "v$VERSION" --json isDraft --jq '.isDraft')"
+          has_dmg="$(gh release view "v$VERSION" --json assets --jq '[.assets[].name] | index("Loudini.dmg") != null')"
+          if [ "$is_draft" != "false" ] || [ "$has_dmg" != "true" ]; then
+            echo "::error::release v$VERSION is not fully published (isDraft=$is_draft, hasDMG=$has_dmg)."
+            exit 1
+          fi
 
       - name: Delete the signing keychain
         if: always()
