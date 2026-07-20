@@ -341,11 +341,10 @@ Notes:
 
 Two GitHub Actions workflows (`.github/workflows/`):
 
-- **`ci.yml`** — on every push to `main` and every PR. On a PR (incl. forks, which get no secrets) it
-  ad-hoc-compiles `Loudini.app` on a macOS runner; on a push to `main` it instead does the real
-  Developer-ID build + DMG signing via `scripts/package-dmg.sh` with `SKIP_NOTARIZE=1` (skips only
-  Apple's notary wait), so packaging/signing breakage is caught before a release is ever cut. Both
-  also typecheck + build the Stream Deck plugin on Linux.
+- **`ci.yml`** — on every push to `main` and every PR, compiles `Loudini.app` (ad-hoc signed) on a
+  macOS runner and typechecks + builds the Stream Deck plugin on Linux. Purely a "did this break the
+  build" signal. No secrets; fork PRs build safely because GitHub never exposes secrets to them.
+  (Developer-ID signing + notarization happen locally in `scripts/release.sh`, not here.)
 - **`release.yml`** — **dormant manual cloud fallback** (`workflow_dispatch` only). Releases are cut
   **locally** with `scripts/release.sh` (below); this workflow only runs when you trigger it from
   Actions → release → Run workflow (e.g. to build the current version in the cloud). When triggered, a
@@ -357,9 +356,9 @@ Two GitHub Actions workflows (`.github/workflows/`):
   `releases/latest/download/Loudini.dmg`, so it always resolves to the newest release.
 
 **One-time setup — five repository secrets** (Settings → Secrets and variables → Actions → New
-repository secret). CI uses these for the per-push build/sign check (`ci.yml`) and the manual
-`release.yml` dispatch; the local `scripts/release.sh` does NOT use them — it signs with your keychain
-cert and notarizes via your `loudini` notarytool profile:
+repository secret). These are used **only** by the manual `release.yml` cloud fallback — the local
+`scripts/release.sh` doesn't touch them (it signs with your keychain cert and notarizes via your
+`loudini` notarytool profile), so you can skip this entirely if you only ever release locally:
 
 ```sh
 # 1. Export the Developer ID Application cert + private key to a .p12, then base64 it.
@@ -381,6 +380,15 @@ Cut a release (locally, from your Mac): bump `CFBundleShortVersionString` in `me
 then commit, `git push origin main`, and run `scripts/release.sh`. It builds, notarizes, staples, and
 publishes the GitHub Release; re-running is safe (it bails if the version is already published). If you
 ever want a cloud build instead, trigger `release.yml` manually (Actions → release → Run workflow).
+
+Tip: `SKIP_NOTARIZE=1 scripts/package-dmg.sh` builds and Developer-ID-signs the DMG while skipping the
+Apple notary wait — handy for checking packaging/signing locally without waiting on Apple.
+
+Check Apple's verdict with `scripts/notary-status.sh` — no args lists recent submissions and their
+statuses, `--watch` re-polls every 60s, `<submission-id>` shows one, and `<submission-id> log` prints
+Apple's reasons when a submission comes back `Invalid`. Notarization is an automated scan (no human
+review): `In Progress` → `Accepted` normally takes 2–15 min, so hours stuck means Apple is stalling.
+Note the timestamps it prints are **UTC**.
 
 Notes:
 - The signing cert lives in your GitHub secrets, so anyone with push access to `main` (or who can edit

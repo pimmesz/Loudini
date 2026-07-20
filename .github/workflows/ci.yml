@@ -1,10 +1,10 @@
 name: ci
 
-# Build-check on every code push/PR so a broken main is caught before a release is
-# ever cut. PRs (incl. forks, which get no secrets) run an ad-hoc compile check.
-# Pushes to main additionally do the real Developer-ID build + DMG signing (skipping
-# only Apple's notary wait), so packaging/signing regressions surface here, not at
-# release time. Fork PRs never touch secrets, so contributions build safely.
+# Compile-check on every code push/PR so a broken main is caught before a release is
+# ever cut. No secrets needed: the app is ad-hoc signed here (build-app.sh falls back
+# automatically), which is all a build check requires — releases are built, Developer-ID
+# signed and notarized LOCALLY via scripts/release.sh. Fork PRs cannot access secrets on
+# GitHub, and this workflow needs none, so contributions build safely.
 on:
   # NOTE: paths-ignore means a docs-only / Markdown-only change won't start this
   # workflow — so do NOT make the app/plugin jobs *required* status checks while
@@ -31,45 +31,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
-      # PRs (including forks, which get no secrets): a plain ad-hoc compile check.
       - name: Build Loudini.app (ad-hoc signed)
-        if: github.event_name == 'pull_request'
         run: menubar/build-app.sh
-
-      # Pushes to main (secrets available): the real Developer-ID build + DMG signing,
-      # skipping only Apple's notary wait — so packaging/signing breakage surfaces here
-      # instead of at release time. build-app.sh runs inside package-dmg.sh.
-      - name: Import the Developer ID cert into a temporary keychain
-        if: github.event_name == 'push'
-        env:
-          CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
-          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
-        run: |
-          set -euo pipefail
-          keychain="$RUNNER_TEMP/loudini-signing.keychain-db"
-          keychain_pw="$(openssl rand -base64 24)"
-
-          security create-keychain -p "$keychain_pw" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_pw" "$keychain"
-
-          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          rm -f "$RUNNER_TEMP/cert.p12"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_pw" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | sed 's/"//g')
-
-      - name: Build + Developer-ID-sign the app and DMG (no notarize)
-        if: github.event_name == 'push'
-        env:
-          SKIP_NOTARIZE: '1'
-        run: scripts/package-dmg.sh
-
-      - name: Delete the signing keychain
-        if: always()
-        run: security delete-keychain "$RUNNER_TEMP/loudini-signing.keychain-db" || true
 
   plugin:
     runs-on: ubuntu-latest
