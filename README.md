@@ -163,6 +163,14 @@ and prints the exact fix for anything broken.
 
 ## Gotchas
 
+- **WebKit apps share one per-app row.** Safari and anything embedding WebKit (Citrix Workspace,
+  Zscaler, many Electron-ish wrappers) all play audio from a helper process reporting the *same*
+  bundle id, `com.apple.WebKit.GPU`. Per-app volumes are keyed on that id, so if two of them play
+  at once they collapse into a single row and share one level — and the row is named after
+  whichever was seen last. Chrome is unaffected (it uses its own id). Splitting them needs a
+  different key than the bundle id, which `status.json`, the CLI and the Stream Deck plugin all
+  match on, so it is a deliberate breaking change rather than a quick fix. The master volume is
+  unaffected either way — it applies to everything.
 - **Virtual audio devices as your default output** (Background Music, BlackHole routed as default,
   eqMac): quit/uninstall them. Loudini taps the default output and re-renders back to it; a virtual
   device that re-plays that audio creates a feedback loop. Loudini covers the same "software volume"

@@ -699,9 +699,9 @@ final class AppRoster {
     private func resolveName(pid: pid_t, bundleID: String) -> String {
         if let app = NSRunningApplication(processIdentifier: pid),
            let n = app.localizedName, !n.isEmpty {
-            return n
+            return Self.trimHelperSuffix(n)
         }
-        if let n = parentAppName(bundleID: bundleID) { return n }
+        if let n = parentAppName(bundleID: bundleID) { return Self.trimHelperSuffix(n) }
         // Last resort: the executable name beats a bare id tail, which for helper
         // bundle ids is literally "helper".
         if let n = processName(pid: pid) { return n }
@@ -709,6 +709,17 @@ final class AppRoster {
         // a bundle-less source whose process name is gone must still name its pid.
         let tail = bundleID.components(separatedBy: ".").last ?? ""
         return tail.isEmpty ? "pid \(pid)" : tail
+    }
+
+    /// WebKit plays audio from a helper process that macOS DOES register, under the
+    /// name "<App> Graphics and Media" — Safari, and anything embedding WebKit. The
+    /// suffix is noise in a volume row, so drop it: the user thinks of it as Safari.
+    /// Only ever trims, never invents, so an app genuinely called that keeps its name.
+    private static func trimHelperSuffix(_ name: String) -> String {
+        let suffix = " Graphics and Media"
+        guard name.hasSuffix(suffix) else { return name }
+        let trimmed = String(name.dropLast(suffix.count))
+        return trimmed.isEmpty ? name : trimmed
     }
 
     /// Browsers and Electron apps render audio from helper processes, which are
