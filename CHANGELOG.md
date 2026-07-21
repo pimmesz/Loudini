@@ -3,6 +3,38 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-07-21
+
+### Added
+- **Render-stall watchdog** — the daemon now watches its own render heartbeat.
+  If the audio pipeline goes quiet while apps are playing, it tears the tap down
+  so sound returns to the direct path instead of leaving you in silence, then
+  rebuilds. `status.json` reports `reason: "render stalled"` while it recovers.
+- **Automated tests** — 55 contract checks over the control/status file
+  (`scripts/test.sh`), run on every push. They pin the invariants that matter:
+  per-app overrides survive a master-only write, a malformed file keeps the last
+  good value, gains clamp to 0–100, and a dead daemon can't claim `running:true`.
+- **`scripts/make-dev-cert.sh`** — one idempotent command for the stable
+  "Loudini Dev" signing identity, so TCC grants stop resetting on every rebuild.
+- **`scripts/bump-version.sh`** — writes the version to all five files that
+  carry it, instead of five hand edits.
+
+### Fixed
+- The menu named the wrong fix for Background Music: the daemon and the menu-bar
+  app kept separate lists of conflicting apps and had drifted apart. Both now
+  read one shared list (`helper/Conflicts.swift`).
+- Sharing a link to loudini.app showed no preview image, and the page's canonical
+  URL pointed at the old github.io address.
+
+### Changed
+- Releases now fail fast. A preflight asserts the five version homes agree, that
+  no version is hardcoded in the packaging script, and that these release notes
+  are actually written — in seconds, before the build and Apple's notary queue,
+  rather than an hour into it.
+- Re-running a release no longer re-buys work Apple already accepted: a stapled
+  app is reused when it matches the current sources, and an interrupted DMG
+  notarization resumes instead of re-uploading.
+
 ## [0.2.0] — 2026-07-19
 
 ### Added
