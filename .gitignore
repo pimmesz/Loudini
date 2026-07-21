@@ -10,3 +10,6 @@ dist/
 package-lock.json
 yarn.lock
 node_modules/
+
+# Claude Code writes a machine-local lock here; the tracked skill stays tracked.
+.claude/scheduled_tasks.lock
