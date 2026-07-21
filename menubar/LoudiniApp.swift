@@ -408,13 +408,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return menu
     }
 
-    /// Other apps known to tap the media keys; whoever installed their tap
-    /// last sees the keys first, so these can starve Loudini (and vice versa).
-    private func mediaKeyRival() -> String? {
-        let rivals: Set<String> = ["MonitorControl", "Background Music", "BeardedSpice"]
-        return NSWorkspace.shared.runningApplications
-            .compactMap { $0.localizedName }
-            .first { rivals.contains($0) }
+    /// The first running app known to fight with Loudini, or nil. Which apps those are —
+    /// and what to tell the user about each — lives in helper/Conflicts.swift, the same
+    /// list `loudini doctor` checks, so the two never give conflicting advice.
+    private func runningRival() -> String? {
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.localizedName })
+        return Conflicts.all.first { running.contains($0) }
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -427,10 +426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         inputMonitoringItem.isHidden = !(ddc.isAvailable && wantsBrightnessGrab
                                          && !BrightnessKeyListener.accessGranted)
         if ddc.isAvailable { brightnessSlider.doubleValue = Double(ddc.percent) }
-        if let rival = mediaKeyRival() {
-            conflictItem.title = "\(rival) may intercept the volume keys"
-            conflictItem.toolTip = "If the keys don't reach Loudini, disable volume-key handling in "
-                + "\(rival), or launch Loudini after it."
+        if let rival = runningRival() {
+            conflictItem.title = Conflicts.problem(for: rival)
+            conflictItem.toolTip = "Fix: \(Conflicts.fixHint(for: rival))"
             conflictItem.isHidden = false
         } else {
             conflictItem.isHidden = true

@@ -1,6 +1,7 @@
 # Loudini — per-app volume control (spec)
 
-> Design spec, not built yet. Written in the BUILD.md house style: everything needed is here.
+> Rollout phases 1-3 shipped in 0.2.0; phase 4 and the Open questions are still open.
+> Written in the BUILD.md house style: everything needed is here.
 > Read top to bottom before touching code. The master-volume engine described in BUILD.md/README.md
 > is the baseline; this extends it.
 

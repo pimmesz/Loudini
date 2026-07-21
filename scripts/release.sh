@@ -34,6 +34,10 @@ git fetch -q origin main
   exit 1
 }
 
+# Cheap deterministic checks (version agreement across the five files that carry it)
+# BEFORE the expensive build + notary wait, so drift costs seconds instead of an hour.
+"${script_dir}/preflight.sh"
+
 version="$(python3 -c "import plistlib; print(plistlib.load(open('menubar/Info.plist','rb'))['CFBundleShortVersionString'])")"
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
   echo "ERROR: CFBundleShortVersionString '${version}' is not a strict N.N.N version." >&2

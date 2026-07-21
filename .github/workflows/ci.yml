@@ -34,6 +34,15 @@ jobs:
       - name: Build Loudini.app (ad-hoc signed)
         run: menubar/build-app.sh
 
+  test:
+    # Same macOS runner as the app job: the contract tests are pure Foundation and need no
+    # audio hardware or TCC grants, but swiftc still wants the macOS toolchain.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Contract tests (helper/ControlFile.swift)
+        run: scripts/test.sh
+
   plugin:
     runs-on: ubuntu-latest
     defaults:

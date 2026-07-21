@@ -1,0 +1,27 @@
+name: preflight
+
+# Version-agreement check on EVERY push/PR — deliberately its own workflow rather than a
+# job in ci.yml. paths-ignore is workflow-level in GitHub Actions, and ci.yml ignores
+# 'docs/**' and '**/*.md' (see the trap note there); but two of the five version homes
+# preflight guards ARE those paths (docs/index.html, CHANGELOG.md). A preflight job inside
+# ci.yml would therefore never run for the exact commits most likely to drift.
+# Seconds on ubuntu, no secrets, no macOS runner.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preflight-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version agreement across the five version homes
+        run: bash scripts/preflight.sh

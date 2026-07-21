@@ -31,10 +31,10 @@ First run, in order:
 
 > **⚠️ Ad-hoc builds: re-grant after every rebuild.** With ad-hoc signing each rebuild changes the
 > app's code identity, so macOS silently invalidates both grants **while the Settings toggles still
-> show enabled**. Fix: the menu's **Repair Volume-Key Permission…** item (Accessibility) and the
-> **Audio capture not working — click to fix** row (System Audio Recording), or
-> `tccutil reset Accessibility gg.pim.loudini.menubar` + relaunch. **This goes away once you set up the
-> stable "Loudini Dev" cert** (see BUILD.md → Signing) — grants then survive rebuilds.
+> show enabled**. Run **`scripts/make-dev-cert.sh`** once and this stops happening — grants then
+> survive rebuilds. To recover a build you already have: the menu's **Repair Volume-Key Permission…**
+> item (Accessibility) and the **Audio capture not working — click to fix** row (System Audio
+> Recording).
 
 ## Pick your frontend
 
@@ -130,7 +130,8 @@ Two JSON files in `~/.config/loudini/` are the whole API:
     hard-killed daemon can't leave a lying status behind.
   - `pipeline` — `true` only when audio is actually being captured and re-rendered.
     `running:true, pipeline:false` almost always means the System Audio Recording permission is
-    missing (or `reason:"no-device"`: no output device).
+    missing (or `reason:"no-device"`: no output device; `reason:"render stalled"`: the daemon tore
+    the tap down after the render callbacks went quiet while apps were playing, and is rebuilding it).
   - `device` — current output device name; `pid` — the daemon's process id; `reason` — why the
     pipeline is down (omitted when it's up).
   - `apps` — the live roster of apps currently producing audio (read-only):

@@ -49,6 +49,6 @@ if (existsSync(helperSrc)) {
   console.warn(`WARNING: daemon binary missing at ${helperSrc}`);
   console.warn('The plugin will load but cannot control audio. Build the daemon with:');
   console.warn('  cd helper && swiftc -O -parse-as-library -o loudini-helper \\');
-  console.warn('    loudini-helper.swift ControlFile.swift DDC.swift \\');
+  console.warn('    loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \\');
   console.warn('    -framework CoreAudio -framework AudioToolbox -framework Foundation -framework IOKit');
 }

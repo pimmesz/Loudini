@@ -63,7 +63,8 @@ them in order because each builds on the last, but the deliverable is the whole 
   near the bottom, and the control/status file IO. You'll extend the arg parsing in Phase 1.
 - `helper/loudini-helper` — compiled arm64 binary (already built). Recompile with:
   ```
-  swiftc -O -parse-as-library -o loudini-helper loudini-helper.swift ControlFile.swift DDC.swift \
+  swiftc -O -parse-as-library -o loudini-helper \
+    loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \
     -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit
   ```
 - `plugin/src/control.ts` — the TS side of the contract. Exports `readControl()`/`writeControl(c)`/
@@ -84,6 +85,13 @@ them in order because each builds on the last, but the deliverable is the whole 
 - **All writes to `control.json` MUST be atomic** (write a temp file in the same dir, then `rename()`),
   because up to three frontends may write it concurrently and the daemon reads it mid-write. This is the
   #1 thing to get right and the #1 thing to have Codex check.
+
+**Gate:** `scripts/test.sh` — the contract regression tests (`helper/ControlFileTests.swift`). Run it after
+any change to `helper/ControlFile.swift`; CI runs it on every push. It pins the invariants above: per-app
+overrides survive a master-only write, lenient parsing keeps the last good value, gains clamp to 0–100, a
+dead daemon can't claim `running:true`, and `atomicWrite` leaves no `.tmp` behind. It writes to a throwaway
+home via `CFFIXED_USER_HOME` (**not** `$HOME`, which `homeDirectoryForCurrentUser` ignores) so it can never
+touch your real `~/.config/loudini`.
 
 ---
 
@@ -284,25 +292,12 @@ constantly. A stable self-signed cert fixes it: the identity (a fixed certificat
 so grants persist. Create it once:
 
 ```sh
-cd "$(mktemp -d)"
-cat > cert.conf <<'EOF'
-[ req ]
-distinguished_name = dn
-x509_extensions = v3
-prompt = no
-[ dn ]
-CN = Loudini Dev
-[ v3 ]
-basicConstraints = critical, CA:false
-keyUsage = critical, digitalSignature
-extendedKeyUsage = critical, codeSigning
-EOF
-openssl req -x509 -newkey rsa:2048 -days 3650 -nodes -keyout key.pem -out cert.pem -config cert.conf
-# -legacy + SHA1 MAC: macOS's Security framework can't import OpenSSL 3's default PKCS#12 MAC.
-openssl pkcs12 -export -legacy -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
-  -out ident.p12 -inkey key.pem -in cert.pem -passout pass:loudini
-security import ident.p12 -k ~/Library/Keychains/login.keychain-db -P loudini -T /usr/bin/codesign -A
+scripts/make-dev-cert.sh
 ```
+
+Safe to re-run: it exits early if the cert already exists, because a second leaf would change the
+designated requirement and break the grants it exists to preserve. It prints the `tccutil` lines to
+run afterwards.
 
 The cert lists as `CSSMERR_TP_NOT_TRUSTED` (self-signed) — that's fine, `codesign` still signs with it and
 the designated requirement stays stable (`identifier "gg.pim.loudini.menubar" and certificate leaf = H"…"`).
@@ -375,14 +370,35 @@ base64 -i DeveloperID.p12 | pbcopy      # paste as DEVELOPER_ID_CERT_P12
 | `APPLE_TEAM_ID` | 10-char Developer Team ID (e.g. `24BDPF6PWJ`) |
 | `APPLE_APP_PASSWORD` | an app-specific password from appleid.apple.com |
 
-Cut a release (locally, from your Mac): bump `CFBundleShortVersionString` in `menubar/Info.plist`
-(e.g. `0.2.0` -> `0.3.0`) — and the plugin's `package.json` + manifest versions, for consistency —
-then commit, `git push origin main`, and run `scripts/release.sh`. It builds, notarizes, staples, and
-publishes the GitHub Release; re-running is safe (it bails if the version is already published). If you
-ever want a cloud build instead, trigger `release.yml` manually (Actions → release → Run workflow).
+Cut a release (locally, from your Mac): run `scripts/bump-version.sh 0.3.0`. The version lives in five
+files that must agree (`menubar/Info.plist`, the plugin's `package.json` + Stream Deck manifest, the
+`docs/index.html` footer, and a `CHANGELOG.md` heading); the script backs up all five to a temp dir
+(printed before it rewrites anything, so a half-done bump is still recoverable), writes them, and adds a
+dated CHANGELOG skeleton. Fill that skeleton in — preflight rejects the `TODO` placeholder, so a release
+can't publish it. Then commit, `git push origin main`, and run `scripts/release.sh`.
+It builds, notarizes, staples, and publishes the GitHub Release; re-running is safe (it bails if the
+version is already published). If you ever want a cloud build instead, trigger `release.yml` manually
+(Actions → release → Run workflow).
+
+`scripts/preflight.sh` is the cheap gate behind that. Before `release.sh` builds anything it asserts the
+five versions agree, that this version's CHANGELOG section is actually written (an empty section or the
+bump-version `TODO` placeholder fails — that text would be published verbatim as the release notes), and
+that no release-version literal (`v0.3.0`, `Loudini-0.3.0`) is baked into `package-dmg.sh`. Drift costs
+seconds instead of an hour in Apple's notary queue. It also runs on every push/PR via
+`.github/workflows/preflight.yml`. Run it standalone any time.
 
 Tip: `SKIP_NOTARIZE=1 scripts/package-dmg.sh` builds and Developer-ID-signs the DMG while skipping the
 Apple notary wait — handy for checking packaging/signing locally without waiting on Apple.
+
+Re-running after an aborted notary wait is cheap, within limits. `package-dmg.sh` reuses
+`menubar/Loudini.app` only when all three hold — it is this version, it is stapled, and no `.swift` file
+in `menubar/` or `helper/` is newer than the built binary — so a source fix made since the aborted run
+still forces a rebuild instead of quietly shipping the old binary (the log names the file that triggered
+it). Notary resume is **DMG-only**: `dist/.notary-state` maps a DMG's sha256 to its Apple submission id,
+so an interrupted wait resumes that submission instead of re-uploading, and a rejected verdict drops the
+row again so the fixed re-run uploads fresh bytes rather than replaying the rejection. The app zip can
+never resume — it is deleted on every exit, and an unstapled app is rebuilt into different bytes — so it
+is never recorded. Use `FORCE_REBUILD=1 scripts/package-dmg.sh` to rebuild from scratch anyway.
 
 Check Apple's verdict with `scripts/notary-status.sh` — no args lists recent submissions and their
 statuses, `--watch` re-polls every 60s, `<submission-id>` shows one, and `<submission-id> log` prints

@@ -24,7 +24,7 @@
 // returns to the normal direct path.
 //
 // Build:  swiftc -O -parse-as-library -o loudini-helper \
-//           loudini-helper.swift ControlFile.swift DDC.swift \
+//           loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \
 //           -framework CoreAudio -framework AudioToolbox -framework Foundation \
 //           -framework AppKit -framework IOKit
 // Usage:  loudini-helper [--device <UID>]                          (daemon)
@@ -157,7 +157,9 @@ final class Pipeline {
     private(set) var tapID = AudioObjectID(kAudioObjectUnknown)   // global tap
     private(set) var aggID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private var started = false
+    /// Readable so the engine's stall watchdog only ever judges a pipeline the
+    /// HAL was actually asked to run.
+    private(set) var started = false
 
     // Per-app taps (approach A). Each overridden app that got its own tap
     // arrives on its own buffer, is scaled by its per-app gain, and is summed
@@ -190,6 +192,13 @@ final class Pipeline {
     /// each callback. Word-aligned 32-bit store/load is atomic on arm64; the
     /// render thread never blocks on this.
     var gain: Float
+
+    /// Render heartbeat: bumped once per IO callback so the engine can tell a
+    /// live pipeline from a wedged one. Same lock-free deal as `gain` — the IO
+    /// thread is the only writer, everyone else only reads, and a word-aligned
+    /// 64-bit store is atomic on arm64, so the render loop neither locks nor
+    /// allocates for it. Wraps harmlessly: the watchdog only compares samples.
+    private var heartbeatCount: UInt64 = 0
 
     // Optional per-second metering (LOUDINI_METER=1), guarded by an unfair
     // lock that is only ever briefly held (proven dropout-free in the prototype).
@@ -320,6 +329,10 @@ final class Pipeline {
         // AudioDeviceStop + AudioDeviceDestroyIOProcID before this Pipeline can
         // be released, so no callback can outlive self.
         let io: AudioDeviceIOBlock = { [unowned(unsafe) self] _, inInputData, _, outOutputData, _ in
+            // Heartbeat first, before any early return below: what the watchdog
+            // needs to know is whether the HAL is still calling us at all.
+            self.heartbeatCount = self.heartbeatCount &+ 1
+
             let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             let outList = UnsafeMutableAudioBufferListPointer(outOutputData)
             let g = self.gain
@@ -462,6 +475,10 @@ final class Pipeline {
         return "in=\(shapeInBufs) buffers (tap=last: \(shapeTapCh)ch/\(shapeTapBytes)B) "
              + "out=\(shapeOutBufs) buffers ([0]=\(shapeOutCh)ch/\(shapeOutBytes)B)"
     }
+
+    /// Current render heartbeat. Monotonic for the life of this pipeline, so
+    /// "unchanged since the last sample" means no IO callback ran in between.
+    func heartbeat() -> UInt64 { heartbeatCount }
 
     /// (rms in, rms out, callbacks) since last call, then resets.
     func drainMeter() -> (Double, Double, UInt64) {
@@ -719,6 +736,36 @@ final class Engine {
     /// Why the pipeline is down: "" (it's up), "no-device", or the error text.
     private var lastReason = ""
     private var meterTimer: DispatchSourceTimer?
+
+    // Render-stall watchdog. The aggregate can stop calling our IOProc without
+    // the HAL firing any of the listeners we have (the classic aggregate glitch
+    // on USB DAC / Bluetooth churn), and because every app is muted-when-tapped
+    // that is total silence with nothing to notice it.
+    private var stallTimer: DispatchSourceTimer?
+    private var lastHeartbeat: UInt64 = 0
+    /// When the heartbeat last moved (or was last deliberately re-armed), on the
+    /// uptime clock. Set for real on every successful build.
+    private var lastHeartbeatMove: TimeInterval = 0
+    /// Uptime at which the last stall-triggered rebuild is (or was) due to run,
+    /// for the cooldown below.
+    private var lastStallRebuild: TimeInterval?
+    /// How often we sample the heartbeat.
+    private static let stallPoll: TimeInterval = 2.0
+    /// How long the heartbeat may sit still, with an app actively producing
+    /// output, before we call the pipeline wedged. Deliberately generous: the
+    /// aggregate does not always call us promptly (see scheduleShapeLog, which
+    /// polls for up to a minute), AppRoster lingers apps for 5s, and a
+    /// false-positive teardown is worse than a missed stall.
+    private static let stallWindow: TimeInterval = 15.0
+    /// The same for a pipeline that has NEVER rendered a callback: much longer
+    /// rope, because a fresh aggregate can take a while to start pumping and an
+    /// app can be "producing output" on a device that isn't ours.
+    private static let startupStallWindow: TimeInterval = 60.0
+    /// Grace between the stall teardown and its rebuild — let the HAL settle.
+    private static let stallRebuildDelay: TimeInterval = 2.0
+    /// Rebuild after a stall at most this often. A pipeline that wedges again
+    /// straight away is not something a fast rebuild loop fixes.
+    private static let stallRebuildCooldown: TimeInterval = 300.0
     /// Live "producing audio" roster, maintained by AppRoster and published in
     /// status.json. Read-only in Phase 1 (no render-path effect).
     private var roster: AppRoster?
@@ -818,6 +865,14 @@ final class Engine {
             r.start()
             roster = r
 
+            // Watch the render heartbeat. Always on: this is the one failure the
+            // daemon cannot see any other way.
+            let s = DispatchSource.makeTimerSource(queue: queue)
+            s.schedule(deadline: .now() + Self.stallPoll, repeating: Self.stallPoll)
+            s.setEventHandler { [weak self] in self?.checkRenderStall() }
+            s.resume()
+            stallTimer = s
+
             if meterEnabled {
                 let t = DispatchSource.makeTimerSource(queue: queue)
                 t.schedule(deadline: .now() + 1, repeating: 1)
@@ -906,6 +961,7 @@ final class Engine {
             isShutdown = true
             pendingWork?.cancel()
             meterTimer?.cancel()
+            stallTimer?.cancel()
             roster?.stop()
             roster = nil
             currentApps = []
@@ -934,6 +990,71 @@ final class Engine {
         let work = DispatchWorkItem { [weak self] in self?.rebuildLocked(reason: reason) }
         pendingWork = work
         queue.asyncAfter(deadline: .now() + after, execute: work)
+    }
+
+    /// Seconds on the uptime clock, which does NOT advance while the machine is
+    /// asleep. The watchdog measures "how long since a callback" against it so a
+    /// sleep/wake gap (or any wall-clock step) can never look like a stall the
+    /// way Date() would: no callbacks are expected while suspended, so none of
+    /// that time may count. Same clock the poll timer itself runs on.
+    private func uptimeNow() -> TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
+
+    /// One sample of the render heartbeat. Conservative on purpose — it only
+    /// acts on a pipeline that has gone completely quiet for the whole stall
+    /// window with at least one app actively producing output the whole time.
+    private func checkRenderStall() {
+        guard !isShutdown, let p = pipeline, p.started else { return }
+
+        let now = uptimeNow()
+        let ticks = p.heartbeat()
+        if ticks != lastHeartbeat {
+            lastHeartbeat = ticks
+            lastHeartbeatMove = now
+            return
+        }
+        // Nothing playing ⇒ no callbacks expected; an idle stretch must never
+        // count toward the stall window.
+        guard currentApps.contains(where: { $0.active }) else {
+            lastHeartbeatMove = now
+            return
+        }
+        // A build that has never rendered gets the longer window, but is never
+        // exempt: a live tap whose IOProc never fires is total silence with the
+        // daemon reporting healthy — the exact failure this watchdog exists for.
+        let window = ticks == 0 ? Self.startupStallWindow : Self.stallWindow
+        guard now - lastHeartbeatMove >= window else { return }
+        lastHeartbeatMove = now
+
+        // Destroying the taps IS the fix: muteBehavior is .mutedWhenTapped, so
+        // every app unmutes the instant its tap dies and sound is back on the
+        // direct path before any rebuild starts.
+        let what = ticks == 0 ? "never produced an IO callback in \(Int(window))s"
+                              : "no IO callback for \(Int(window))s"
+        log("render stalled: \(what) while apps are producing output "
+            + "— destroying the tap, audio returns to the direct path (fail-open)")
+        pipeline?.destroy()
+        pipeline = nil
+        // No pipeline ⇒ no per-app tap applied, same as rebuildLocked.
+        builtBundleIndex = [:]
+        lastReason = "render stalled"
+        publishStatus()
+
+        // Rate-limited, but always retried. Nothing else brings the pipeline
+        // back while it is nil (reconcileAppTaps and apply(control:) both no-op
+        // then), and on a device with no volume scalar of its own that would
+        // leave the user with no volume control at all.
+        var delay = Self.stallRebuildDelay
+        if let last = lastStallRebuild {
+            delay = max(delay, last + Self.stallRebuildCooldown - now)
+        }
+        lastStallRebuild = now + delay
+        if delay > Self.stallRebuildDelay {
+            log("a stall rebuild ran less than \(Int(Self.stallRebuildCooldown))s ago — "
+                + "waiting \(Int(delay))s before rebuilding again (audio stays on the direct path)")
+        }
+        scheduleRebuild(reason: "render stalled", after: delay)
     }
 
     // MARK: device-volume (scalar) plumbing — all on `queue`
@@ -1077,6 +1198,9 @@ final class Engine {
             pipeline = p
             currentDevice = dev
             lastReason = ""
+            // Fresh pipeline, fresh heartbeat baseline (its counter starts at 0).
+            lastHeartbeat = 0
+            lastHeartbeatMove = uptimeNow()
             // Signature reflects what we WANTED (`desired`), not what built, so a
             // per-app tap that failed-open into the master path doesn't make the
             // set look "changed" every poll and thrash rebuilds.
@@ -1518,6 +1642,11 @@ enum LoudiniHelper {
                     warn("daemon.lock held but status.json says running=false — daemon may be mid-start; re-run doctor")
                 } else if s.pipeline {
                     pass("audio pipeline live on \"\(s.device)\" (gain=\(s.gain) muted=\(s.muted))")
+                } else if s.reason == "render stalled" {
+                    warn("the audio pipeline stalled and was torn down — sound plays normally on the direct path, "
+                         + "but Loudini's volume control is inactive until it rebuilds",
+                         fix: "switch output device (or restart the daemon) to rebuild now; "
+                            + "see ~/.config/loudini/daemon.log")
                 } else if s.reason == "no-device" {
                     fail("daemon running but no output device is available",
                          fix: "connect or select an output device (System Settings -> Sound)")
@@ -1555,15 +1684,17 @@ enum LoudiniHelper {
         }
 
         print("environment:")
-        if processRunning("Background Music") {
-            fail("Background Music is running — it double-captures with Loudini and feeds back",
-                 fix: "quit/uninstall Background Music; Loudini replaces it")
-        } else {
-            pass("Background Music not running")
+        // Names, problems and fixes all come from Conflicts.swift so the menu-bar app
+        // says exactly the same thing about the same app.
+        for rival in Conflicts.captureRivals {
+            if processRunning(rival) {
+                fail(Conflicts.problem(for: rival), fix: Conflicts.fixHint(for: rival))
+            } else {
+                pass("\(rival) not running")
+            }
         }
-        for rival in ["MonitorControl", "BeardedSpice"] where processRunning(rival) {
-            warn("\(rival) is running and may intercept the volume keys",
-                 fix: "disable volume-key handling in \(rival), or launch the Loudini app after it")
+        for rival in Conflicts.mediaKeyRivals where processRunning(rival) {
+            warn(Conflicts.problem(for: rival), fix: Conflicts.fixHint(for: rival))
         }
 
         print(failures == 0 ? "\nAll good." : "\n\(failures) problem(s) found.")

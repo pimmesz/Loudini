@@ -17,7 +17,7 @@ target="$(uname -m)-apple-macos14.4"
 # bundled daemon can never go stale relative to the sources.
 echo "building loudini-helper (daemon + CLI)…"
 (cd "${repo_dir}/helper" && swiftc -O -parse-as-library -target "${target}" -o loudini-helper \
-  loudini-helper.swift ControlFile.swift DDC.swift \
+  loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \
   -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit)
 
 rm -rf "${app:?}"
@@ -32,6 +32,7 @@ swiftc -O -parse-as-library -target "${target}" \
   "${menubar_dir}/DDCBrightness.swift" \
   "${menubar_dir}/BrightnessKeyListener.swift" \
   "${repo_dir}/helper/ControlFile.swift" \
+  "${repo_dir}/helper/Conflicts.swift" \
   -framework AppKit
 
 cp "${menubar_dir}/Info.plist" "${app}/Contents/Info.plist"
@@ -63,7 +64,7 @@ elif security find-identity -p codesigning 2>/dev/null | grep -q "Loudini Dev"; 
   echo "signing DEV with: Loudini Dev (self-signed, stable)"
 else
   sign=(--force --timestamp=none --sign -)
-  echo "signing AD-HOC (no cert) — permissions reset on every rebuild"
+  echo "signing AD-HOC (no cert) — permissions reset on every rebuild; fix: scripts/make-dev-cert.sh"
 fi
 # Sign the nested helper before the outer bundle (inside-out, as codesign wants).
 codesign "${sign[@]}" "${app}/Contents/MacOS/loudini-helper"

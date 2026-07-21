@@ -18,8 +18,8 @@ All notable changes to Loudini are documented here. This project adheres to
 - **Stable code-signing** so TCC grants survive rebuilds; the release build is
   Developer-ID signed, hardened-runtime, and notarization-ready.
 - **One-click install** — a signed & notarized `.dmg`, downloadable from
-  [loudini.app](https://loudini.app) and each GitHub release, built automatically
-  by CI on a version tag.
+  [loudini.app](https://loudini.app) and each GitHub release, built and notarized
+  locally via `scripts/release.sh`.
 
 ### Changed
 - New **level-bars** app icon and mark across the app, menu bar, and site.
