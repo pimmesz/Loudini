@@ -39,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var accessibilityItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var monoIconItem: NSMenuItem!
+    private var updateCheckItem: NSMenuItem!
+    private var updateItem: NSMenuItem!
     private var brightnessItem: NSMenuItem!
 
     // Per-app volume section (Phase 3). One row per status.json.apps entry, built
@@ -63,6 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// When on, the menu-bar logo renders as a template (single colour that
     /// follows the menu-bar text), so it blends in with other monochrome icons.
     private var wantsMonoIcon = UserDefaults.standard.bool(forKey: "monoIcon")
+
+    /// Daily update check, on unless the user turned it off. bool(forKey:) reads
+    /// an unset key as false, so read the raw object to keep the default ON.
+    private var wantsUpdateCheck = UserDefaults.standard.object(forKey: "autoUpdateCheck") as? Bool ?? true
     private var brightnessSlider: NSSlider!
 
     /// External-monitor brightness over DDC (no daemon involved).
@@ -89,12 +95,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastShownGain = 100
     private var lastShownMuted = false
     private var isQuitting = false
+    /// True while the menu is on screen, so an async update reply never inserts a
+    /// row under the user's pointer mid-click.
+    private var isMenuOpen = false
     private var wantsKeyGrab = true
     /// Last (gain, muted) seen running — HUD fires only when the level moves.
     private var lastLevel: (gain: Int, muted: Bool)?
 
     /// Control writes happen off the main thread (tap callback + UI must not block on IO).
     private let writeQueue = DispatchQueue(label: "gg.pim.loudini.menubar.write", qos: .userInitiated)
+
+    /// The running build's version, straight from Info.plist. Never hardcoded —
+    /// troubleshooting a stale permission grant depends on knowing which build
+    /// this is. Falls back to 0.0.0 only when run unbundled (no Info.plist).
+    private static let appVersion =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
 
     /// The bundled logo, sized for the status bar (nil when running unbundled).
     private static let menuBarLogo: NSImage? = {
@@ -185,6 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = buildMenu()
         renderStatusItem()
 
+        // Re-show yesterday's finding right away (the check itself is daily),
+        // then check if one is due.
+        showCachedUpdate()
+        checkForUpdate()
+
         hud = HUDWindow()
         ensureDaemon()
         // Recover a missing daemon while status shows it down (covers crashes,
@@ -251,7 +271,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let nameLabel = NSTextField(labelWithString: "Loudini")
         nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        nameLabel.frame = NSRect(x: 42, y: 9, width: 130, height: 17)
+        // Fit the name so the version can sit right after it, instead of after
+        // a fixed 130pt of empty space.
+        nameLabel.sizeToFit()
+        nameLabel.setFrameOrigin(NSPoint(x: 42, y: 9))
+        // Which build is running, dimmed next to the name: it belongs to the
+        // app's identity, not to the actions below, and the header already
+        // pairs a name with a value.
+        let versionLabel = NSTextField(labelWithString: "v\(Self.appVersion)")
+        versionLabel.font = .systemFont(ofSize: 11)
+        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.sizeToFit()
+        versionLabel.setFrameOrigin(NSPoint(x: nameLabel.frame.maxX + 6, y: 10))
         headerLevelLabel = NSTextField(labelWithString: "100%")
         headerLevelLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         headerLevelLabel.textColor = .secondaryLabelColor
@@ -259,6 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         headerLevelLabel.frame = NSRect(x: 196, y: 9, width: 70, height: 17)
         header.addSubview(logoView)
         header.addSubview(nameLabel)
+        header.addSubview(versionLabel)
         header.addSubview(headerLevelLabel)
         headerItem.view = header
         menu.addItem(headerItem)
@@ -400,6 +432,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monoIconItem.image = NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: nil)
         menu.addItem(monoIconItem)
 
+        updateCheckItem = NSMenuItem(title: "Check for Updates Automatically",
+                                     action: #selector(toggleUpdateCheck), keyEquivalent: "")
+        updateCheckItem.target = self
+        updateCheckItem.state = wantsUpdateCheck ? .on : .off
+        updateCheckItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+        menu.addItem(updateCheckItem)
+
+        // Shown only when GitHub reports a strictly newer release; clicking it
+        // opens the releases page — Loudini never downloads or installs itself.
+        updateItem = NSMenuItem(title: "", action: #selector(updateClicked), keyEquivalent: "")
+        updateItem.target = self
+        updateItem.isHidden = true
+        updateItem.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+        menu.addItem(updateItem)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Loudini", action: #selector(quitClicked), keyEquivalent: "q")
@@ -417,6 +464,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        // Runs BEFORE the menu is on screen, so growing it here is safe — and it
+        // must happen before isMenuOpen, which suppresses exactly that.
+        showCachedUpdate()
+        isMenuOpen = true
         refreshPermissionUI()
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         brightnessItem.isHidden = !ddc.isAvailable
@@ -438,6 +489,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // wouldn't fire) are reflected — chiefly the "Reset App Volumes" row's
         // visibility, which is driven by control.json, not the roster.
         renderApps(lastApps, hasOverrides: !ControlOps.current().apps.isEmpty)
+        // A machine that never restarts would otherwise never check again.
+        checkForUpdate()
     }
 
     // MARK: status.json -> UI (the visual layer; reacts to changes from ANY frontend)
@@ -809,6 +862,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(wantsMonoIcon, forKey: "monoIcon")
         monoIconItem.state = wantsMonoIcon ? .on : .off
         renderStatusItem()
+    }
+
+    // MARK: update check (GitHub releases, look-only)
+
+    private static let latestReleaseAPI = "https://api.github.com/repos/pimmesz/Loudini/releases/latest"
+    private static let latestReleasePage = "https://github.com/pimmesz/Loudini/releases/latest"
+
+    @objc private func toggleUpdateCheck() {
+        wantsUpdateCheck.toggle()
+        UserDefaults.standard.set(wantsUpdateCheck, forKey: "autoUpdateCheck")
+        updateCheckItem.state = wantsUpdateCheck ? .on : .off
+        // Off means off: no call, and the banner goes with it. Back on brings
+        // the last known tag straight back, without waiting for the next check.
+        if wantsUpdateCheck {
+            showCachedUpdate()
+            checkForUpdate()
+        } else {
+            // Off means off NOW: kill any transfer already in the air, or it would
+            // keep talking to GitHub (and record its answer) after the opt-out.
+            updateTask?.cancel()
+            updateTask = nil
+            updateItem.isHidden = true
+        }
+    }
+
+    /// Re-show the tag GitHub last reported, without asking again.
+    private func showCachedUpdate() {
+        if let seen = UserDefaults.standard.string(forKey: "lastSeenTag") { showUpdateRow(seen) }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+    }
+
+    @objc private func updateClicked() {
+        NSWorkspace.shared.open(URL(string: Self.latestReleasePage)!)
+    }
+
+    /// Ephemeral (no cache, no cookies) and time-bounded, so a proxy that trickles
+    /// bytes forever can't leave a task alive: URLSession's default resource timeout
+    /// is SEVEN DAYS, and the request timeout is only an idle timer.
+    private static let updateSession: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 15
+        c.timeoutIntervalForResource = 30
+        // Nothing to accept and nothing to send back: a public unauthenticated
+        // endpoint has no business setting a cookie on us.
+        c.httpShouldSetCookies = false
+        c.httpCookieStorage = nil
+        return URLSession(configuration: c)
+    }()
+
+    /// The in-flight check, so switching the toggle off actually stops it.
+    private var updateTask: URLSessionDataTask?
+
+    /// Ask GitHub for the latest release tag, at most once a day. Unauthenticated,
+    /// no query params, no auth, nothing identifying the user.
+    /// We set User-Agent to a bare "Loudini" deliberately: GitHub rejects a request
+    /// without one (403), and CFNetwork's default would otherwise announce the exact
+    /// Darwin kernel build — this sends strictly less.
+    /// Any failure is silent on purpose — a menu-bar utility must not nag.
+    private func checkForUpdate() {
+        guard wantsUpdateCheck else { return }
+        let lastCheck = UserDefaults.standard.double(forKey: "lastUpdateCheck")
+        guard Date().timeIntervalSince1970 - lastCheck >= 24 * 60 * 60 else { return }
+        // Stamp before the call, not after, so a failing network can't turn the
+        // rate limit into a check on every menu open.
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lastUpdateCheck")
+        var request = URLRequest(url: URL(string: Self.latestReleaseAPI)!)
+        request.setValue("Loudini", forHTTPHeaderField: "User-Agent")
+        // Pin these too: left alone, CFNetwork fills Accept-Language from the
+        // user's language list, which is a fingerprint of its own.
+        request.setValue("en", forHTTPHeaderField: "Accept-Language")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let task = Self.updateSession.dataTask(with: request) { data, _, _ in
+            // A release JSON is a few KB; anything huge is not what we asked for.
+            guard let data, data.count < 1_000_000, let tag = Self.parseTag(data) else { return }
+            UserDefaults.standard.set(tag, forKey: "lastSeenTag")
+            DispatchQueue.main.async { [weak self] in self?.showUpdateRow(tag) }
+        }
+        updateTask = task
+        task.resume()
+    }
+
+    /// tag_name out of the release JSON (e.g. "v0.4.0"), or nil if it isn't there.
+    private static func parseTag(_ data: Data) -> String? {
+        let json = try? JSONSerialization.jsonObject(with: data)
+        guard let tag = (json as? [String: Any])?["tag_name"] as? String, !tag.isEmpty else { return nil }
+        return tag
+    }
+
+    /// Show the banner only for a strictly newer release; hide it otherwise.
+    private func showUpdateRow(_ tag: String) {
+        guard !isQuitting else { return }
+        let shouldShow = wantsUpdateCheck && Self.isNewer(tag, than: Self.appVersion)
+        if shouldShow { updateItem.title = "Update available: \(tag)" }
+        // Never change the menu's HEIGHT while it is on screen — in either
+        // direction. A reply landing mid-click would shift every row below it,
+        // including Quit, under the pointer. The tag is cached, so the next open
+        // reflects whatever this check found.
+        guard !isMenuOpen else { return }
+        updateItem.isHidden = !shouldShow
+    }
+
+    /// Numeric components of a version, tolerating a leading "v" and trailing
+    /// junk on a component ("v0.4.0" -> [0, 4, 0]).
+    private static func versionParts(_ version: String) -> [Int] {
+        let digits = version.hasPrefix("v") || version.hasPrefix("V")
+            ? version.dropFirst() : version[...]
+        return digits.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) ?? 0 }
+    }
+
+    /// True when `remote` is strictly greater than `local`. Missing components
+    /// count as zero, so "0.3" and "0.3.0" compare equal.
+    private static func isNewer(_ remote: String, than local: String) -> Bool {
+        let r = versionParts(remote), l = versionParts(local)
+        for i in 0..<max(r.count, l.count) {
+            let a = i < r.count ? r[i] : 0
+            let b = i < l.count ? l[i] : 0
+            if a != b { return a > b }
+        }
+        return false
     }
 
     @objc private func openAccessibilitySettings() {

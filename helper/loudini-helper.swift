@@ -694,17 +694,39 @@ final class AppRoster {
         onChange(snapshot)
     }
 
-    /// pid -> display name: localizedName for GUI apps, else a bundle-id tail or
-    /// the executable name, else the pid.
+    /// pid -> display name: localizedName for GUI apps, else the parent app of a
+    /// helper bundle id, else the executable name, else the pid.
     private func resolveName(pid: pid_t, bundleID: String) -> String {
         if let app = NSRunningApplication(processIdentifier: pid),
            let n = app.localizedName, !n.isEmpty {
             return n
         }
-        if !bundleID.isEmpty {
-            return bundleID.components(separatedBy: ".").last ?? bundleID
+        if let n = parentAppName(bundleID: bundleID) { return n }
+        // Last resort: the executable name beats a bare id tail, which for helper
+        // bundle ids is literally "helper".
+        if let n = processName(pid: pid) { return n }
+        // `.last` on an empty id yields "" (not nil), so check the tail is real —
+        // a bundle-less source whose process name is gone must still name its pid.
+        let tail = bundleID.components(separatedBy: ".").last ?? ""
+        return tail.isEmpty ? "pid \(pid)" : tail
+    }
+
+    /// Browsers and Electron apps render audio from helper processes, which are
+    /// not registered apps — so the pid lookup fails and the id tail is useless.
+    /// Their ids nest under the parent app ("com.google.Chrome.helper.renderer"),
+    /// so drop trailing components until a running app claims the id.
+    private func parentAppName(bundleID: String) -> String? {
+        var parts = bundleID.components(separatedBy: ".")
+        // Stop above 2 components — "com" on its own is never a real app id.
+        while parts.count > 2 {
+            parts.removeLast()
+            let parentID = parts.joined(separator: ".")
+            if let n = NSRunningApplication.runningApplications(withBundleIdentifier: parentID)
+                .compactMap({ $0.localizedName }).first, !n.isEmpty {
+                return n
+            }
         }
-        return processName(pid: pid) ?? "pid \(pid)"
+        return nil
     }
 
     private func processName(pid: pid_t) -> String? {
