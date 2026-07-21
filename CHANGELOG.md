@@ -3,6 +3,30 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-07-21
+
+### Added
+- **The menu shows which version you're running**, next to the Loudini name.
+  Worth knowing when a rebuild has quietly invalidated your permissions.
+- **Update notifications.** Loudini asks GitHub once a day whether a newer
+  release exists, and if so adds a row that opens the releases page. It never
+  downloads or installs anything by itself. Turn it off with **Check for
+  Updates Automatically** in the menu, and nothing is ever requested.
+  This is the first version that can tell you about an update — 0.3.0 and
+  earlier have no way to know a new one exists.
+
+### Fixed
+- Per-app rows showed **"helper"** instead of the app's name. Browsers and
+  Electron apps play audio from helper processes, which macOS doesn't report as
+  applications, so the row fell back to the tail of the bundle id. Loudini now
+  resolves the parent app, so the row reads "Google Chrome".
+
+### Changed
+- The update check is the only network request Loudini makes. It is
+  unauthenticated, sends nothing that identifies you or your machine — the
+  User-Agent and language headers are pinned so the system can't add your kernel
+  build or language list — stores no cookies, and is silent when it fails.
+
 ## [0.3.0] — 2026-07-21
 
 ### Added
