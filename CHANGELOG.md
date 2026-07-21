@@ -3,6 +3,17 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-07-21
+
+### Fixed
+- Safari and other WebKit apps showed as **"Safari Graphics and Media"** in the
+  per-app list — the name of macOS's media helper. Loudini now trims that suffix,
+  so the row reads "Safari". (Two WebKit apps playing at once still share one row;
+  see the gotcha in the README.)
+- The landing page now carries the icon formats an inline SVG favicon can't cover
+  — an Apple touch icon for iOS home-screen bookmarks, and a PNG fallback for
+  Safari older than 16.4.
+
 ## [0.4.0] — 2026-07-21
 
 ### Added
