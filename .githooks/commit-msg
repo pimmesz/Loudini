@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Keep AI attribution out of commit messages.
+#
+# Three commits once carried "Co-Authored-By: Claude <noreply@anthropic.com>". That listed
+# Claude as a contributor on GitHub, and removing it cost a full history rewrite plus a
+# force-push of main and all three release tags. This makes reintroducing it impossible
+# by accident.
+#
+# Deliberate override (e.g. a real human co-author): git commit --no-verify
+set -euo pipefail
+
+# Drop comment lines — git strips them from the final message anyway, and a commented
+# line quoting a trailer is not attribution.
+body="$(grep -v '^#' "$1" || true)"
+
+bad="$(printf '%s\n' "$body" \
+  | grep -inE '^[[:space:]]*co-authored-by:|anthropic\.com|generated with .*claude' \
+  | head -1 || true)"
+
+if [ -n "$bad" ]; then
+  echo "commit-msg: rejected — this repo keeps AI attribution out of commit messages." >&2
+  echo "  offending line ${bad}" >&2
+  echo "  override on purpose with: git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0
