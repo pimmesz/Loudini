@@ -9,7 +9,18 @@ No driver, no kext, no admin rights. Loudini uses a driverless Core Audio **proc
 to your output device through a software gain. It **fails open** — if the daemon ever dies, macOS
 instantly restores the normal direct audio path. A crash can never leave you muted.
 
-## Quick start (menu-bar app — the easiest path)
+## Download
+
+**[Download Loudini.dmg](https://github.com/pimmesz/Loudini/releases/latest/download/Loudini.dmg)** —
+Developer ID signed & notarized by Apple, Apple Silicon, macOS 14.4+.
+More at **[loudini.app](https://loudini.app)** · [all releases](https://github.com/pimmesz/Loudini/releases)
+
+Open the `.dmg`, drag Loudini to Applications, then follow **First run** below.
+
+## Build from source
+
+Requires macOS 14.4+ and the Xcode Command Line Tools (`xcode-select --install`) — `build-app.sh`
+uses `swiftc` and `codesign`; the release scripts also need `python3`.
 
 ```sh
 menubar/build-app.sh && open menubar/Loudini.app
@@ -18,10 +29,12 @@ menubar/build-app.sh && open menubar/Loudini.app
 One command: it compiles the engine (`helper/loudini-helper`, the daemon + CLI binary), builds the
 app, and bundles the daemon inside.
 
-First run, in order:
+## First run
 
-1. If you downloaded this instead of building it: right-click → Open once (Gatekeeper), or
-   `xattr -dr com.apple.quarantine Loudini.app` (recursive — quarantine sits on every file inside).
+1. **Built it yourself?** Ad-hoc-signed builds are unsigned as far as macOS is concerned: right-click →
+   Open once, or `xattr -dr com.apple.quarantine Loudini.app` (recursive — quarantine sits on every
+   file inside). The DMG from Releases needs none of this: it is signed and notarized, and opens on a
+   normal double-click.
 2. Grant **Accessibility** when prompted — this is what lets Loudini own your volume keys.
 3. Grant **System Audio Recording** when the daemon starts — this is the volume engine itself.
    (Loudini captures app audio only to re-render it at your chosen volume; nothing is recorded.)
@@ -41,7 +54,7 @@ First run, in order:
 | Frontend | Needs | What you get |
 |---|---|---|
 | **Menu-bar app** (`menubar/`) | Accessibility + System Audio Recording | Volume keys just work (hold **⇧ Shift** for 1% fine steps); live level in the menu bar (+ ⚠︎ when broken); volume + brightness sliders, mute, HUD; Start at Login; self-repair actions |
-| **CLI** (`scripts/install-cli.sh`) | a running daemon (app or LaunchAgent) | `loudini up/down/mute/set/get/doctor` from any terminal or hotkey tool |
+| **CLI** (`scripts/install-cli.sh`) | a running daemon for the volume commands; `brightness` and `doctor` need nothing | `loudini up/down/mute/set/get/apps/app/brightness/doctor` from any terminal or hotkey tool |
 | **Stream Deck** (`plugin/`) | Stream Deck app | Up/Down/Mute keys, faces show the live level (`42%` / 🔇 / ⚠︎) |
 | **Karabiner / BTT / skhd** | that tool + the CLI | Bind any key to the CLI — recipe in the appendix |
 
@@ -97,13 +110,19 @@ loudini down [step]   volume -= step (default 6), un-mutes
 loudini mute          toggle mute
 loudini set <0-100>   set the volume
 loudini get           print: gain=42 muted=false running=true pipeline=true device="Scarlett 2i2 USB"
+loudini apps          list apps currently producing audio (from status.json)
+loudini apps reset    reset every per-app volume to 100% (clears overrides)
+loudini app <id|name> set <0-100> | mute | get
+                      set/toggle/read one app's volume (bundle id exact, name fuzzy)
 loudini doctor        diagnose the whole setup (daemon, permissions, conflicts) with fixes
 loudini brightness up|down [step] | set <0-100> | get
                       external-monitor brightness over DDC — needs NO permission, bind it to any key
 ```
 
-The subcommands only write `control.json` and exit instantly — the running daemon applies the change
-within 100 ms. Debug metering: `LOUDINI_METER=1 loudini` runs the daemon with per-second in/out RMS
+The volume subcommands (`up`/`down`/`mute`/`set`/`apps`/`app`) only write `control.json` and exit
+instantly — the running daemon applies the change within 100 ms. `brightness` needs no daemon at all:
+it talks to the display over DDC directly. `doctor` only reads, and exits non-zero when it finds
+problems, so it is safe to use in a script's health check. Debug metering: `LOUDINI_METER=1 loudini` runs the daemon with per-second in/out RMS
 logging (stop the normal daemon first — the single-instance lock makes a second one exit).
 
 ## Stream Deck plugin
@@ -120,9 +139,11 @@ pnpm --package=@elgato/cli dlx streamdeck link gg.pim.loudini.sdPlugin   # regis
 
 Two JSON files in `~/.config/loudini/` are the whole API:
 
-- `control.json` — `{"gain": 0-100, "muted": bool}`. Write it (atomically: temp file in the same
-  directory, then rename) and the daemon applies it within 100 ms. Malformed content is ignored —
-  the daemon keeps its last good values.
+- `control.json` — `{"gain": 0-100, "muted": bool, "apps"?: {"<bundleID>": {"gain": 0-100, "muted": bool}}}`.
+  Write it (atomically: temp file in the same directory, then rename) and the daemon applies it within
+  100 ms. Malformed content is ignored — the daemon keeps its last good values.
+  **If you only own `gain`/`muted`, read-modify-write — never replace the document.** Writing just
+  `{"gain":…,"muted":…}` erases the whole `apps` map and every per-app volume with it.
 - `status.json` — written by the daemon on every change:
   - `gain`, `muted` — the applied level.
   - `running` — daemon alive (`false` after a clean shutdown). Readers should also probe `pid`:
@@ -168,7 +189,7 @@ and prints the exact fix for anything broken.
   bundle id, `com.apple.WebKit.GPU`. Per-app volumes are keyed on that id, so if two of them play
   at once they collapse into a single row and share one level — and the row is named after
   whichever was seen last. Chrome is unaffected (it uses its own id). Splitting them needs a
-  different key than the bundle id, which `status.json`, the CLI and the Stream Deck plugin all
+  different key than the bundle id, which `status.json`, the CLI and the menu-bar app all
   match on, so it is a deliberate breaking change rather than a quick fix. The master volume is
   unaffected either way — it applies to everything.
 - **Virtual audio devices as your default output** (Background Music, BlackHole routed as default,

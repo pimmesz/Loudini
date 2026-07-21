@@ -75,9 +75,16 @@ them in order because each builds on the last, but the deliverable is the whole 
 
 ## The contract (the universal API — do not break it)
 
-- **`~/.config/loudini/control.json`** — `{"gain": <int 0-100>, "muted": <bool>}`. Any frontend WRITES
-  this. The daemon reads it every 100 ms (lenient parse: bad/partial JSON keeps the last good value).
-- **`~/.config/loudini/status.json`** — `{"gain","muted","running","device","apps"}`. The daemon WRITES
+- **`~/.config/loudini/control.json`** — `{"gain": <int 0-100>, "muted": <bool>, "apps"?: {"<bundleID>":
+  {"gain": <int 0-100>, "muted": <bool>}}}`. Any frontend WRITES this. The daemon reads it every 100 ms
+  (lenient parse: bad/partial JSON keeps the last good value).
+  **A writer that owns only `gain`/`muted` MUST read-modify-write, never replace the document** —
+  emitting just `{"gain":…,"muted":…}` erases the `apps` map and every per-app override with it.
+- **`~/.config/loudini/status.json`** — `{"gain","muted","running","pipeline","device","pid","reason"?,"apps"}`.
+  `pipeline` is the capture pipeline's health (a daemon can be `running:true` with `pipeline:false` when the
+  System Audio Recording grant is missing) and `pid` is what readers probe to catch a hard-killed daemon —
+  treat the file as `running:false` when that process is gone. Omitting either is how a frontend reports a
+  dead engine as fully working. The daemon WRITES
   this atomically on every change (and `running:false` on shutdown). Frontends READ it to show the live
   level. `apps` is the live read-only roster of processes producing audio right now
   (`kAudioProcessPropertyIsRunningOutput`): `[{bundleID,name,pid,gain,muted,active}]` — see
@@ -110,7 +117,7 @@ Extend `loudini-helper`'s arg parsing so **one binary does both jobs**:
 - `loudini-helper mute` → toggle `muted`, atomic-write, exit 0.
 - `loudini-helper set <0-100>` → set gain (clamp), atomic-write, exit 0.
 - `loudini-helper get` → print current level, reading `status.json` if present (ground truth) else
-  `control.json`; print e.g. `gain=42 muted=false running=true device="Scarlett 2i2 USB"`; exit 0.
+  `control.json`; print e.g. `gain=42 muted=false running=true pipeline=true device="Scarlett 2i2 USB"`; exit 0.
 
 Key point: **the subcommands never touch Core Audio** — they only read/modify/atomic-write `control.json`
 and exit instantly. The already-running daemon applies the change on its next 100 ms poll. This keeps the
@@ -207,8 +214,8 @@ on keypress and paints the level (`42%` / `🔇`) on the key faces, its own bit 
   `streamDeck.connect()`; add `unhandledRejection`/`uncaughtException` handlers that log and **continue**
   (a crash resets the board).
 - `plugin/package.json` (`type: module`, pnpm, deps `@elgato/streamdeck`, devDeps `esbuild` + `typescript`),
-  `plugin/tsconfig.json` (`experimentalDecorators: true`, `useDefineForClassFields: false` — the `@action`
-  decorators need both), `plugin/build.mjs` (esbuild bundle `src/plugin.ts` → `.sdPlugin/bin/plugin.js`,
+  `plugin/tsconfig.json` (`target: ES2022`, TypeScript 5 **standard** decorators — do NOT add
+  `experimentalDecorators`/`useDefineForClassFields`, they break `@action` typechecking), `plugin/build.mjs` (esbuild bundle `src/plugin.ts` → `.sdPlugin/bin/plugin.js`,
   **paths resolved relative to the script's own dir**, then copy `../helper/loudini-helper` into
   `.sdPlugin/bin/` and `chmod 0o755` so the plugin ships its own daemon; if the binary is missing, warn +
   print the swiftc line, don't fail).
@@ -253,8 +260,8 @@ independent review from the **`codex` MCP tool** (the same one `/cross-review` u
   menu-bar app it's that app. First run triggers the prompt — document it. A packaged `.app` needs
   `NSAudioCaptureUsageDescription` in its `Info.plist`.
 - **Atomic writes** to `control.json` (temp + `rename`) — non-negotiable with multiple frontends.
-- **Decorators:** the Stream Deck plugin's `@action` needs `experimentalDecorators: true` +
-  `useDefineForClassFields: false`.
+- **Decorators:** the Stream Deck plugin's `@action` uses TypeScript 5 **standard** (TC39) decorators on
+  `target: ES2022`. Do not add `experimentalDecorators`/`useDefineForClassFields` — they break typechecking.
 
 ## Constraints
 
@@ -315,12 +322,17 @@ that cert is in your keychain, `build-app.sh` uses it automatically (hardened ru
 # 1. Build (auto-detects the Developer ID and signs release-style).
 menubar/build-app.sh
 
-# 2. Zip and submit for notarization (needs an app-specific password or notarytool profile).
-ditto -c -k --keepParent menubar/Loudini.app /tmp/Loudini.zip
-xcrun notarytool submit /tmp/Loudini.zip --apple-id "you@example.com" \
-  --team-id "TEAMID" --password "app-specific-pw" --wait
+# 2. Store the credentials ONCE in a notarytool keychain profile. Do this instead of passing
+#    --password on submit: KERN_PROCARGS2 makes both argv and the environment readable by any
+#    same-UID process, and `--wait` keeps that process alive for the whole notarization.
+xcrun notarytool store-credentials loudini --apple-id "you@example.com" \
+  --team-id "TEAMID" --password "app-specific-pw"
 
-# 3. Staple the ticket into the bundle so it validates offline.
+# 3. Zip and submit, authenticating with the stored profile — no secret on the command line.
+ditto -c -k --keepParent menubar/Loudini.app /tmp/Loudini.zip
+xcrun notarytool submit /tmp/Loudini.zip --keychain-profile loudini --wait
+
+# 4. Staple the ticket into the bundle so it validates offline.
 xcrun stapler staple menubar/Loudini.app
 ```
 
@@ -334,8 +346,12 @@ Notes:
 
 ### CI / automated releases
 
-Two GitHub Actions workflows (`.github/workflows/`):
+Three GitHub Actions workflows (`.github/workflows/`):
 
+- **`preflight.yml`** — on every push to `main` and every PR, runs `scripts/preflight.sh`: version
+  agreement across the five version homes plus the release-notes check. Deliberately has **no**
+  `paths-ignore`, unlike `ci.yml` — two of the homes it guards (`docs/index.html`, `CHANGELOG.md`) are
+  exactly the paths `ci.yml` skips, so a docs-only or CHANGELOG-only PR is gated by this workflow alone.
 - **`ci.yml`** — on every push to `main` and every PR, compiles `Loudini.app` (ad-hoc signed) on a
   macOS runner and typechecks + builds the Stream Deck plugin on Linux. Purely a "did this break the
   build" signal. No secrets; fork PRs build safely because GitHub never exposes secrets to them.

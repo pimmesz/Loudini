@@ -80,6 +80,15 @@ if [ -n "${ref}" ]; then
   fi
 fi
 
+# SKIP_NOTARIZE exists for a build+sign check, never for a real release: package-dmg.sh would
+# skip both notarizations and this script would still publish the DMG — which the README and the
+# site advertise as notarized. Refuse rather than ship a claim we did not honour.
+if [ -n "${SKIP_NOTARIZE:-}" ]; then
+  echo "ERROR: SKIP_NOTARIZE is set — refusing to cut a release with an un-notarized DMG." >&2
+  echo "       Unset it, or run scripts/package-dmg.sh directly for a build-only check." >&2
+  exit 1
+fi
+
 log "cutting release v${version} — building + notarizing (per-phase timing below; Ctrl-C is safe)…"
 "${script_dir}/package-dmg.sh"
 

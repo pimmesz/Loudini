@@ -54,8 +54,19 @@ if [ -n "${SKIP_NOTARIZE:-}" ]; then
   notary_auth=()
   notary_desc="(SKIP_NOTARIZE — no notarization)"
 elif [[ -n "${NOTARY_APPLE_ID:-}" && -n "${NOTARY_TEAM_ID:-}" && -n "${NOTARY_APP_PW:-}" ]]; then
-  notary_auth=(--apple-id "${NOTARY_APPLE_ID}" --team-id "${NOTARY_TEAM_ID}" --password "${NOTARY_APP_PW}")
-  notary_desc="App Store Connect credentials (env)"
+  # Bootstrap the env password into a keychain profile, then drop it from the environment.
+  # KERN_PROCARGS2 exposes BOTH argv and the environment to any same-UID process, so passing
+  # --password on every call and leaving NOTARY_APP_PW exported for the notarytool children to
+  # inherit are the same leak — and the wait loop below runs for up to an hour per artifact.
+  # store-credentials puts it on argv for about a second; the unset keeps it out of every child
+  # spawned afterwards. Its own '-env' profile, so a one-off env run cannot clobber a stored one.
+  env_profile="${profile}-env"
+  log "storing notary credentials into keychain profile '${env_profile}'…"
+  xcrun notarytool store-credentials "${env_profile}" \
+    --apple-id "${NOTARY_APPLE_ID}" --team-id "${NOTARY_TEAM_ID}" --password "${NOTARY_APP_PW}" >/dev/null
+  unset NOTARY_APP_PW NOTARY_APPLE_ID NOTARY_TEAM_ID
+  notary_auth=(--keychain-profile "${env_profile}")
+  notary_desc="keychain profile '${env_profile}' (bootstrapped from env)"
 else
   notary_auth=(--keychain-profile "${profile}")
   notary_desc="keychain profile '${profile}'"
@@ -172,7 +183,7 @@ notarize() {
       log "notarize ${label}: GAVE UP after ${mins}m — Apple never returned a verdict for ${id}."
       log "  Uploads are accepted but never processed = an Apple-side stall, not your build."
       log "  Check developer.apple.com/account for a pending agreement, then:"
-      log "    xcrun notarytool history --keychain-profile ${profile}"
+      log "    xcrun notarytool history ${notary_auth[*]:-}"
       return 1
     fi
     # No terminal status AND no timeout message → `notarytool wait` itself errored (network/
