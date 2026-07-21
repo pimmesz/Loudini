@@ -192,39 +192,6 @@
     text-wrap: balance;
   }
   .duo strong { color: var(--t1); font-weight: 530; }
-  .duo + .duo { margin-top: 2.4rem; }
-  .duo code, .duo .kbdrow { white-space: nowrap; }
-  kbd {
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid var(--line);
-    border-bottom-width: 2px;
-    color: var(--t2);
-    border-radius: 5px; padding: 1px 7px;
-    font-size: 0.72em; font-weight: 500; letter-spacing: 0.02em;
-  }
-
-  /* section labels: quieter than the statements above them, deliberately */
-  h2 {
-    color: var(--t3); font-size: 0.8rem; font-weight: 590;
-    letter-spacing: 0.09em; text-transform: uppercase;
-    margin-bottom: 1.2rem; text-align: center;
-  }
-  .term {
-    background: #05060f;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 1.05rem 1.25rem;
-    overflow-x: auto;
-    font-size: 0.86rem; line-height: 1.8;
-  }
-  .term .c { color: var(--t3); }
-  .term .p { color: var(--t3); user-select: none; }
-  .postinstall { margin: 0.9rem auto 0; font-size: 0.9rem; color: var(--t3); max-width: 52ch; }
-
-  /* limits */
-  .limits { color: var(--t3); font-size: 0.95rem; max-width: 54ch; margin: 0 auto; }
-  .limits p + p { margin-top: 0.7rem; }
-  .limits strong { color: var(--t2); font-weight: 550; }
 
   /* watermark footer — the one indulgence */
   footer { margin-top: 5rem; position: relative; }
@@ -336,38 +303,6 @@
       </div>
     </div>
     <p class="caption rise d4">The real dropdown, rebuilt — drag the volume slider.</p>
-
-    <section>
-      <p class="duo"><strong>It fails open.</strong> A crash can never mute you.</p>
-      <p class="duo"><strong>Nothing is recorded.</strong> No driver, no kext, no admin rights.</p>
-      <p class="duo"><span class="kbdrow"><kbd>F1</kbd> <kbd>F2</kbd></span> <strong>work too.</strong>
-      Brightness for external monitors.</p>
-      <p class="duo"><strong>Scriptable everywhere.</strong> <code>loudini</code> from any hotkey tool.</p>
-    </section>
-
-    <section>
-      <h2>Install</h2>
-      <div class="term">
-        <pre><code><span class="p">$</span> git clone https://github.com/pimmesz/Loudini.git && cd Loudini
-<span class="p">$</span> menubar/build-app.sh && open menubar/Loudini.app
-<span class="c"># builds the daemon + CLI, bundles them into the app, signs, launches</span></code></pre>
-      </div>
-      <p class="postinstall">macOS asks for Accessibility (the volume keys) and System Audio Recording
-      (the engine) on first run — and Input Monitoring only if you want the brightness keys.
-      Headless setups: <code>scripts/install-daemon.sh</code> + <code>scripts/install-cli.sh</code>.</p>
-    </section>
-
-    <section>
-      <h2>Honest limits</h2>
-      <div class="limits">
-        <p><strong>In-app AirPlay is unreachable.</strong> The AirPlay button inside Safari or Music
-        streams straight to the speaker — that audio never enters CoreAudio, so no tap-based tool can
-        control it. Select the AirPlay device as your system output instead, and Loudini controls it fully.</p>
-        <p><strong>Intel Macs</strong> get everything except brightness. <strong>Keyboards without
-        brightness keys</strong> can bind <code>loudini brightness up/down</code> to any shortcut — that
-        path needs no permissions at all.</p>
-      </div>
-    </section>
 
     <section style="text-align: center;">
       <p class="duo"><strong>Your interface already sounds right.</strong> Give it volume keys.</p>
