@@ -8,10 +8,8 @@ bin_dir="${HOME}/.local/bin"
 link="${bin_dir}/loudini"
 
 if [[ ! -x "${helper}" ]]; then
-  echo "error: ${helper} is missing or not executable. Build it first:" >&2
-  echo "  cd helper && swiftc -O -parse-as-library -o loudini-helper \\" >&2
-  echo "    loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \\" >&2
-  echo "    -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit" >&2
+  echo "error: ${helper} is missing or not executable." >&2
+  echo "  Build it first: menubar/build-app.sh (the single source of the build command)." >&2
   exit 1
 fi
 

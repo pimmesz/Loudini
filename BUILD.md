@@ -61,12 +61,9 @@ them in order because each builds on the last, but the deliverable is the whole 
 
 - `helper/loudini-helper.swift` — daemon source. Note the existing arg parsing (`--device <UID>`, `-h`)
   near the bottom, and the control/status file IO. You'll extend the arg parsing in Phase 1.
-- `helper/loudini-helper` — compiled arm64 binary (already built). Recompile with:
-  ```
-  swiftc -O -parse-as-library -o loudini-helper \
-    loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \
-    -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit
-  ```
+- `helper/loudini-helper` — compiled arm64 binary (already built). Rebuild it with
+  `menubar/build-app.sh` — the single source of the build command (source list, frameworks,
+  and the `-target` that pins the macOS 14.4 floor); building it by hand risks omitting a file.
 - `plugin/src/control.ts` — the TS side of the contract. Exports `readControl()`/`writeControl(c)`/
   `readStatus()`/`nudge(delta)`/`toggleMute()`. Mirror this behavior in the Swift CLI so both frontends
   agree exactly (clamp 0–100; `nudge`/`up`/`down` also **un-mutes**).

@@ -228,6 +228,57 @@ private func testNudge() {
     checkEqual("nudge keeps apps", try! ControlOps.nudge(10).apps["a"], AppOverride(gain: 20, muted: false))
 }
 
+// MARK: - per-app mutators (Phase 3)
+
+/// The `apps`-map mutators only had coverage through nudge before; these pin the
+/// seed-a-default, clamp, empty-id-no-op, target-isolation and master-preservation rules.
+private func testPerAppMutators() {
+    removeFixtures()
+
+    // setApp seeds a default (100/false) for a new app, then clamps the gain.
+    try! writeControl(Control(gain: 50, muted: false))
+    let a1 = try! ControlOps.setApp("com.x", gain: 250)
+    checkEqual("setApp seeds default + clamps gain", a1.apps["com.x"], AppOverride(gain: 100, muted: false))
+    checkEqual("setApp leaves master gain", a1.gain, 50)
+
+    // An empty bundle id is a no-op — there is nothing stable to target. Check on a fresh
+    // control so "added no entry" shows as an empty map (setApp returns current() unchanged).
+    removeFixtures()
+    try! writeControl(Control(gain: 50, muted: false))
+    check("setApp empty id is a no-op", try! ControlOps.setApp("", gain: 30).apps.isEmpty)
+
+    // toggleAppMute seeds a default then flips only the muted flag.
+    removeFixtures()
+    try! writeControl(Control(gain: 60, muted: false))
+    checkEqual("toggleAppMute seeds default + flips", try! ControlOps.toggleAppMute("com.y").apps["com.y"],
+               AppOverride(gain: 100, muted: true))
+    check("toggleAppMute flips back", try! ControlOps.toggleAppMute("com.y").apps["com.y"]?.muted == false)
+    check("toggleAppMute empty id is a no-op", try! ControlOps.toggleAppMute("").apps.count == 1)
+
+    // toggleAppMute touches only its target.
+    try! writeControl(Control(gain: 60, muted: false,
+                              apps: ["a": AppOverride(gain: 20, muted: false),
+                                     "b": AppOverride(gain: 30, muted: false)]))
+    let only = try! ControlOps.toggleAppMute("a")
+    check("toggleAppMute flips only the target", only.apps["a"]?.muted == true)
+    checkEqual("toggleAppMute leaves siblings", only.apps["b"], AppOverride(gain: 30, muted: false))
+
+    // resetApps clears every override but leaves master gain/mute alone.
+    try! writeControl(Control(gain: 40, muted: true, apps: ["a": AppOverride(gain: 20, muted: false)]))
+    let r = try! ControlOps.resetApps()
+    check("resetApps clears the apps map", r.apps.isEmpty)
+    checkEqual("resetApps keeps master gain", r.gain, 40)
+    check("resetApps keeps master mute", r.muted == true)
+
+    // Master-only writes (set / toggleMute) must never drop the apps map, and set clamps.
+    try! writeControl(Control(gain: 50, muted: false, apps: ["a": AppOverride(gain: 20, muted: false)]))
+    checkEqual("set(gain:) keeps apps", try! ControlOps.set(gain: 70).apps["a"], AppOverride(gain: 20, muted: false))
+    try! writeControl(Control(gain: 50, muted: false, apps: ["a": AppOverride(gain: 20, muted: false)]))
+    checkEqual("toggleMute keeps apps", try! ControlOps.toggleMute().apps["a"], AppOverride(gain: 20, muted: false))
+    try! writeControl(Control(gain: 50, muted: false))
+    checkEqual("set(gain:) clamps", try! ControlOps.set(gain: 250).gain, 100)
+}
+
 // MARK: - readStatus
 
 /// A SIGKILLed daemon leaves a stale `running:true` file behind. readStatus stamps and
@@ -268,6 +319,16 @@ private func testReadStatusRoster() {
 
     removeFixtures()
     check("missing status returns nil", readStatus() == nil)
+}
+
+/// `reason` drives the menu-bar's "why capture is broken" message, so the parser must
+/// surface it. running:false skips the liveness probe, leaving reason parsed as written.
+private func testReadStatusReason() {
+    writeRaw(#"{"running":false,"pipeline":false,"reason":"no-device","device":"X"}"#, to: statusURL)
+    checkEqual("reason is parsed", readStatus()?.reason, "no-device")
+    writeRaw(#"{"running":false}"#, to: statusURL)
+    checkEqual("missing reason defaults empty", readStatus()?.reason, "")
+    removeFixtures()
 }
 
 // MARK: - atomicWrite
@@ -321,8 +382,10 @@ struct ControlFileTests {
         testWriteControlShape()
         testReadControlLeniency()
         testNudge()
+        testPerAppMutators()
         testReadStatusDeadDaemon()
         testReadStatusRoster()
+        testReadStatusReason()
         testAtomicWriteLeavesNoResidue()
         testAppEntryJSON()
 

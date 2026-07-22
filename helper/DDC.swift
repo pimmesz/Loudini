@@ -99,11 +99,12 @@ enum DDC {
             writeLuminance(av, value: Int((Double(pct) / 100 * Double(max)).rounded()))
             usleep(20_000)
         }
-        // The daemon creates this dir on startup, but the CLI can run first on
-        // a fresh machine — without it the cache write silently fails.
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        try? JSONSerialization.data(withJSONObject: ["percent": pct], options: [.sortedKeys])
-            .write(to: cacheURL, options: .atomic)
+        // Cache the level so a menu open reflects it instantly. atomicWrite (ControlFile.swift)
+        // creates ~/.config/loudini if the CLI runs first on a fresh machine, and writes via a
+        // swept temp name + rename — the shared path every other ~/.config/loudini writer uses.
+        try? atomicWrite(
+            JSONSerialization.data(withJSONObject: ["percent": pct], options: [.sortedKeys]),
+            to: cacheURL)
         return pct
     }
 

@@ -495,14 +495,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: status.json -> UI (the visual layer; reacts to changes from ANY frontend)
 
+    // Compute the "Output: …" menu row's (title, enabled, tooltip) from plain values in one
+    // exhaustive switch — no force-unwraps, one assignment site instead of a 4-way if/else.
+    private func updateDeviceItem(running: Bool, pipelineOK: Bool, reason: String, device: String) {
+        let title: String, enabled: Bool, toolTip: String?
+        switch (running, pipelineOK) {
+        case (false, _):
+            title = "Daemon not running"; enabled = false; toolTip = nil
+        case (true, false) where reason == "no-device":
+            title = "No output device"; enabled = false; toolTip = nil
+        case (true, false):
+            // Permission is the most likely cause, but the daemon can't distinguish it
+            // from other capture failures — say so honestly and still make the row the fix.
+            title = "Audio capture not working — click to fix"; enabled = true
+            toolTip = "Most likely the System Audio Recording permission."
+                + (reason.isEmpty ? "" : " Daemon reports: \(reason)")
+        case (true, true):
+            title = "Output: \(device.isEmpty ? "default device" : device)"; enabled = false; toolTip = nil
+        }
+        deviceItem.title = title
+        deviceItem.isEnabled = enabled
+        deviceItem.toolTip = toolTip
+    }
+
     private func statusChanged(_ status: Status?) {
         guard !isQuitting else { return }
         let running = status?.running ?? false
         lastStatusRunning = running
         // While the daemon is down, show what control.json will apply when it's back.
         let control = ControlOps.current()
-        let gain = running ? status!.gain : control.gain
-        let muted = running ? status!.muted : control.muted
+        let gain = running ? (status?.gain ?? control.gain) : control.gain
+        let muted = running ? (status?.muted ?? control.muted) : control.muted
 
         lastPipelineOK = status?.pipeline ?? false
         lastShownGain = gain
@@ -514,33 +537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         headerLevelLabel.stringValue = !running ? "off" : muted ? "Muted" : "\(gain)%"
         muteItem.state = muted ? .on : .off
-        if !running {
-            deviceItem.title = "Daemon not running"
-            deviceItem.isEnabled = false
-            deviceItem.toolTip = nil
-        } else if !lastPipelineOK {
-            if status!.reason == "no-device" {
-                deviceItem.title = "No output device"
-                deviceItem.isEnabled = false
-                deviceItem.toolTip = nil
-            } else {
-                // Permission is the most likely cause, but the daemon can't
-                // distinguish it from other capture failures — say so honestly
-                // and still make the row the (probable) fix.
-                deviceItem.title = "Audio capture not working — click to fix"
-                deviceItem.isEnabled = true
-                deviceItem.toolTip = "Most likely the System Audio Recording permission."
-                    + (status!.reason.isEmpty ? "" : " Daemon reports: \(status!.reason)")
-            }
-        } else {
-            deviceItem.title = "Output: \(status!.device.isEmpty ? "default device" : status!.device)"
-            deviceItem.isEnabled = false
-            deviceItem.toolTip = nil
-        }
+        updateDeviceItem(running: running, pipelineOK: lastPipelineOK,
+                         reason: status?.reason ?? "", device: status?.device ?? "")
 
         // Per-app rows reflect the daemon's roster; the reset affordance appears
         // whenever any override exists in control.json (even for a silent app).
-        lastApps = running ? status!.apps : []
+        lastApps = running ? (status?.apps ?? []) : []
         renderApps(lastApps, hasOverrides: !control.apps.isEmpty)
 
         guard running else {
@@ -625,7 +627,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let keys = apps.map(Self.rowKey)
         if keys == shownAppKeys {
-            for a in apps { updateAppRow(appRows[Self.rowKey(a)], a) }
+            // Rows are invisible while the menu is closed, and StatusWatcher fires ~5x/s
+            // during a ramp — skip the per-row icon/label refresh until the menu is on
+            // screen. menuWillOpen sets isMenuOpen then re-renders, so an open menu is current.
+            if isMenuOpen {
+                for a in apps { updateAppRow(appRows[Self.rowKey(a)], a) }
+            }
             return
         }
         // Structure changed — tear the old rows out and rebuild in roster order,

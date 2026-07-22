@@ -38,11 +38,9 @@ git fetch -q origin main
 # BEFORE the expensive build + notary wait, so drift costs seconds instead of an hour.
 "${script_dir}/preflight.sh"
 
-version="$(python3 -c "import plistlib; print(plistlib.load(open('menubar/Info.plist','rb'))['CFBundleShortVersionString'])")"
-[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "ERROR: CFBundleShortVersionString '${version}' is not a strict N.N.N version." >&2
-  exit 1
-}
+# Plist read + N.N.N validation live in version.sh. Explicit `|| exit 1`: a failing command
+# substitution in an assignment does not trip set -e.
+version="$(bash "${script_dir}/version.sh")" || exit 1
 
 # Published release tags (drafts excluded; a stuck draft from a prior failed run stays
 # retryable). gh failing here trips set -e and aborts (fail closed) rather than guessing

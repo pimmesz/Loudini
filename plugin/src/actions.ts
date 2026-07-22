@@ -37,7 +37,13 @@ abstract class VolumeKey extends SingletonAction {
 
   override async onKeyDown(ev: KeyDownEvent): Promise<void> {
     ensureHelper(log);
-    this.press();
+    try {
+      this.press();
+    } catch (err) {
+      // A control.json write failure must not swallow the repaint — otherwise the key
+      // face keeps showing the stale level and the user can't tell the press was lost.
+      log(`Loudini: control write failed: ${String(err)}`);
+    }
     if (ev.action.isKey()) await paint(ev.action);
   }
 

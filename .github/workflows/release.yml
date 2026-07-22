@@ -36,16 +36,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(python3 -c "import plistlib; print(plistlib.load(open('menubar/Info.plist','rb'))['CFBundleShortVersionString'])")"
+          # Plist read + strict N.N.N validation live in scripts/version.sh (it fails loudly
+          # on an off-scheme string). Explicit `|| exit 1`: a failing command substitution in
+          # an assignment does not trip set -e.
+          version="$(bash scripts/version.sh)" || exit 1
           echo "Info.plist version: $version"
-
-          # Only ever release a strict N.N.N version. A typo'd or pre-release string
-          # (e.g. 0.3.0-beta) sorts as "newer" and would otherwise publish an off-scheme
-          # release — fail loudly instead of shipping a bad tag.
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::CFBundleShortVersionString '$version' is not a strict N.N.N version — refusing to release."
-            exit 1
-          fi
 
           # One authoritative list of PUBLISHED release tags (paginated, no cap; drafts
           # excluded so a stuck draft from a failed run never counts as "released" and

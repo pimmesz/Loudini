@@ -25,12 +25,9 @@ fail() { echo "ERROR: $*" >&2; failures=$((failures + 1)); }
 allow_placeholder=0
 if [[ "${1:-}" == "--allow-changelog-placeholder" ]]; then allow_placeholder=1; fi
 
-# Source of truth, read exactly the way release.sh:37 reads it.
-version="$(python3 -c "import plistlib; print(plistlib.load(open('menubar/Info.plist','rb'))['CFBundleShortVersionString'])")"
-[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "ERROR: CFBundleShortVersionString '${version}' is not a strict N.N.N version." >&2
-  exit 1
-}
+# Source of truth for the version — the plist read + N.N.N validation live in version.sh.
+# Explicit `|| exit 1`: a failing command substitution in an assignment does not trip set -e.
+version="$(bash "${script_dir}/version.sh")" || exit 1
 
 # --- 1. the other four homes must match ----------------------------------------
 pkg_version="$(python3 -c "import json; print(json.load(open('plugin/package.json'))['version'])")"

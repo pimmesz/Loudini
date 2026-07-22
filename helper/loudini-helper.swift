@@ -23,10 +23,9 @@
 // aggregate (they are private objects owned by this HAL client) and audio
 // returns to the normal direct path.
 //
-// Build:  swiftc -O -parse-as-library -o loudini-helper \
-//           loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \
-//           -framework CoreAudio -framework AudioToolbox -framework Foundation \
-//           -framework AppKit -framework IOKit
+// Build:  menubar/build-app.sh  — the single source of the build command (source list,
+//         frameworks, and the -target that pins the macOS 14.4 floor). Building by hand
+//         risks omitting a file the build adds.
 // Usage:  loudini-helper [--device <UID>]                          (daemon)
 //         loudini-helper up|down [step] | mute | set <0-100> | get (CLI — writes control.json
 //                                                                  and exits; never touches
@@ -46,6 +45,16 @@ private let logTimestamp = ISO8601DateFormatter()
 func log(_ msg: String) {
     let line = "[\(logTimestamp.string(from: Date()))] \(msg)\n"
     FileHandle.standardError.write(Data(line.utf8))
+}
+
+// App-supplied text (display names, bundle ids) can carry terminal control bytes, so a
+// malicious app could inject ANSI escapes into `loudini apps` output or daemon.log. Strip
+// C0 controls (keep tab), DEL, and C1 controls (which include the CSI/OSC escape) before
+// any such value reaches stdout or the log. Legitimate names contain none of these.
+func sanitizeForOutput(_ s: String) -> String {
+    String(String.UnicodeScalarView(s.unicodeScalars.filter { u in
+        u.value == 0x09 || !(u.value < 0x20 || u.value == 0x7f || (0x80...0x9f).contains(u.value))
+    }))
 }
 
 // MARK: - small HAL helpers
@@ -235,7 +244,7 @@ final class Pipeline {
             var t = AudioObjectID(kAudioObjectUnknown)
             let e = AudioHardwareCreateProcessTap(d, &t)
             guard e == 0, t != kAudioObjectUnknown else {
-                log("per-app tap for \(spec.bundleID) failed: \(fourCC(e)) — routing it through the master path (fail-open)")
+                log("per-app tap for \(sanitizeForOutput(spec.bundleID)) failed: \(fourCC(e)) — routing it through the master path (fail-open)")
                 continue
             }
             let slot = bundleIDsInOrder.count
@@ -1256,7 +1265,7 @@ final class Engine {
             }
             let appNote = p.bundleIDsInOrder.isEmpty
                 ? "no per-app taps"
-                : "per-app taps: \(p.bundleIDsInOrder.joined(separator: ", "))"
+                : "per-app taps: \(p.bundleIDsInOrder.map(sanitizeForOutput).joined(separator: ", "))"
             let dropped = desired.count - p.bundleIDsInOrder.count
             let droppedNote = dropped > 0 ? " (\(dropped) fell open to master path)" : ""
             log("pipeline live (\(reason)): global tap [excl. pid \(getpid())] -> master \(control.multiplier) -> \(dev.name) [\(dev.uid)]; \(appNote)\(droppedNote)")
@@ -1508,9 +1517,9 @@ enum LoudiniHelper {
                     print("No apps are producing audio.")
                 } else {
                     for a in apps {
-                        let id = a.bundleID.isEmpty ? "-" : a.bundleID
+                        let id = a.bundleID.isEmpty ? "-" : sanitizeForOutput(a.bundleID)
                         let idle = a.active ? "" : "  (idle)"
-                        print("\(id)\t\(a.name)\tgain=\(a.gain)\tmuted=\(a.muted)\(idle)")
+                        print("\(id)\t\(sanitizeForOutput(a.name))\tgain=\(a.gain)\tmuted=\(a.muted)\(idle)")
                     }
                 }
             case "app":
@@ -1528,11 +1537,11 @@ enum LoudiniHelper {
                 case "set":
                     guard args.count == 4, let g = Int(args[3]), (0...100).contains(g) else { usage() }
                     try ControlOps.setApp(bid, gain: g)
-                    print("\(bid) gain=\(g)")
+                    print("\(sanitizeForOutput(bid)) gain=\(g)")
                 case "mute":
                     guard args.count == 3 else { usage() }
                     let c = try ControlOps.toggleAppMute(bid)
-                    print("\(bid) muted=\(c.apps[bid]?.muted ?? false)")
+                    print("\(sanitizeForOutput(bid)) muted=\(c.apps[bid]?.muted ?? false)")
                 case "get":
                     guard args.count == 3 else { usage() }
                     // Prefer the daemon's applied values (what's actually audible);
@@ -1541,7 +1550,7 @@ enum LoudiniHelper {
                     let pending = ControlOps.current().apps[bid]
                     let gain = applied?.gain ?? pending?.gain ?? 100
                     let muted = applied?.muted ?? pending?.muted ?? false
-                    print("bundleID=\(bid) gain=\(gain) muted=\(muted)")
+                    print("bundleID=\(sanitizeForOutput(bid)) gain=\(gain) muted=\(muted)")
                 default:
                     usage()
                 }
@@ -1813,7 +1822,8 @@ enum LoudiniHelper {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: configDir.path) else { return }
         for name in names
-        where (name.hasPrefix(".control.json.") || name.hasPrefix(".status.json."))
+        where (name.hasPrefix(".control.json.") || name.hasPrefix(".status.json.")
+               || name.hasPrefix(".brightness.json."))
             && name.hasSuffix(".tmp") {
             let url = configDir.appendingPathComponent(name)
             guard let attrs = try? fm.attributesOfItem(atPath: url.path),

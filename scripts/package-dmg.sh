@@ -18,8 +18,9 @@ dist="${repo_dir}/dist"
 dmg="${dist}/Loudini.dmg"
 profile="${NOTARY_PROFILE:-loudini}"
 # Derived, never hardcoded — the publish hint at the end of this script has to name the
-# version actually being built. Read from the plist exactly as release.sh reads it.
-version="$(python3 -c "import plistlib; print(plistlib.load(open('${repo_dir}/menubar/Info.plist','rb'))['CFBundleShortVersionString'])")"
+# version actually being built. Plist read + N.N.N validation live in version.sh; explicit
+# `|| exit 1` since a failing command substitution in an assignment does not trip set -e.
+version="$(bash "${script_dir}/version.sh")" || exit 1
 
 # dist/ holds the artifacts; .notary-state remembers which Apple submission id belongs to
 # which exact DMG bytes, so an interrupted DMG wait can be resumed instead of re-uploaded.
