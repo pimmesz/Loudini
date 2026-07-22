@@ -1138,9 +1138,14 @@ final class Engine {
     /// change only `gain`. The daemon owns the master; frontends own `apps`, so
     /// writing our (up-to-one-poll-stale) whole snapshot would drop their edit.
     private func publishGain(_ gain: Int) {
-        var merged = readControl(previous: control) ?? control
-        merged.gain = clampGain(gain)
-        try? writeControl(merged)
+        // Under the shared control.lock so the re-read→write can't lose a per-app
+        // override a frontend writes in the same window (the re-read alone only
+        // covers edits that landed before it).
+        withControlLock {
+            var merged = readControl(previous: control) ?? control
+            merged.gain = clampGain(gain)
+            try? writeControl(merged)
+        }
     }
     /// An external device-volume change (the Touch Bar, another app): mirror it
     /// into control.json so every frontend and our own pipeline follow. The
@@ -1711,9 +1716,16 @@ enum LoudiniHelper {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
             p.arguments = ["print", "gui/\(getuid())/gg.pim.loudini"]
-            p.standardOutput = Pipe()
-            p.standardError = Pipe()
+            // Only terminationStatus is used. Send output to /dev/null: an unread
+            // Pipe() would fill (a fully-described job exceeds the pipe buffer) and
+            // wedge waitUntilExit forever. Bounded wait guards a launchctl that
+            // hangs for any other reason so doctor can't block indefinitely.
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
             try? p.run()
+            let deadline = Date().addingTimeInterval(5)
+            while p.isRunning && Date() < deadline { usleep(50_000) }
+            if p.isRunning { p.terminate() }
             p.waitUntilExit()
             if p.terminationStatus == 0 {
                 pass("LaunchAgent installed and loaded")
@@ -1780,14 +1792,11 @@ enum LoudiniHelper {
         }
 
         sweepStaleTempFiles()
-        if !FileManager.default.fileExists(atPath: controlURL.path) {
-            do {
-                try writeControl(Control(gain: 100, muted: false))
-                log("created default \(controlURL.path)")
-            } catch {
-                log("cannot create default \(controlURL.path): \(error.localizedDescription)")
-            }
-        }
+        // No default pre-create. control.json is created lazily and atomically by
+        // the first frontend write (or the daemon's own publishGain), all under
+        // control.lock. Writing a default here would race a frontend write that
+        // lands during startup (clobbering it), so we just read what's there —
+        // an absent file yields the {100, unmuted} default via ControlOps.current().
 
         let initialControl = ControlOps.current()
         let meterEnabled = ProcessInfo.processInfo.environment["LOUDINI_METER"] == "1"

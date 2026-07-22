@@ -52,6 +52,7 @@ final class DDCBrightness {
     /// Re-enumerate external displays; call on screen-parameter changes.
     /// `done` (optional) runs on the main queue afterwards.
     func rediscover(done: (() -> Void)? = nil) {
+        let genAtStart = targetGeneration   // main thread
         queue.async {
             self.rediscoverLocked()
             let available = !self.services.isEmpty
@@ -59,40 +60,82 @@ final class DDCBrightness {
             DispatchQueue.main.async {
                 self.isAvailable = available
                 self.percent = p
+                // Reseed the step base from the real monitor level only if no user
+                // brightness command landed while we were reading — else we'd revert it.
+                if self.targetGeneration == genAtStart { self.targetPercent = p }
                 done?()
             }
         }
     }
 
-    /// Coalesces slider bursts: only the newest queued `set` actually writes.
-    /// Main-thread only (slider/menu actions).
+    /// The absolute brightness we're driving toward, coalesced on the main
+    /// thread: nudge accumulates onto it, set replaces it, and one cancellable
+    /// work item applies the latest target. A held key then ramps smoothly to
+    /// its final value instead of piling uncancellable per-step writes on the
+    /// (slow) DDC queue. Seeded from the monitor read in rediscover.
+    /// Main-thread only (slider/menu/key actions).
+    private var targetPercent = 50
+    /// Bumped by every user nudge/set. rediscover only reseeds targetPercent from
+    /// the monitor when this is unchanged since it started, so a screen-change
+    /// reseed can't revert a brightness press the user made in the meantime.
+    private var targetGeneration = 0
     private var pendingSet: DispatchWorkItem?
 
     /// percent += delta (clamped 0-100) on every external display.
     func nudge(_ delta: Int, done: @escaping (Int) -> Void) {
-        queue.async {
-            self.applyLocked(self.percentValue + min(100, max(-100, delta)), done: done)
-        }
+        targetPercent = clampGain(targetPercent + min(100, max(-100, delta)))
+        targetGeneration += 1
+        scheduleApply(done: done)
     }
 
     /// percent = value (clamped 0-100). Rapid calls (slider drag) coalesce —
     /// DDC writes are slow, so stale intermediate targets are dropped.
     func set(_ value: Int, done: @escaping (Int) -> Void) {
+        targetPercent = clampGain(value)
+        targetGeneration += 1
+        scheduleApply(done: done)
+    }
+
+    /// Cancel any pending write and queue one for the latest target, so only the
+    /// newest nudge/set actually drives the DDC bus.
+    private func scheduleApply(done: @escaping (Int) -> Void) {
         pendingSet?.cancel()
-        let work = DispatchWorkItem { self.applyLocked(value, done: done) }
+        let target = targetPercent
+        let work = DispatchWorkItem { self.applyLocked(target, done: done) }
         pendingSet = work
         queue.async(execute: work)
+    }
+
+    /// Hold the same cross-process brightness.lock the CLI (helper/DDC.swift)
+    /// takes, so a menu-bar slider/key write and a `loudini brightness` write
+    /// never drive concurrent I2C to the same chip — which corrupts the DDC
+    /// transaction. Fail-open: proceed unlocked if the lock can't be taken.
+    private func withBrightnessLock(_ body: () -> Void) {
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return body() }
+        defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
+        flock(fd, LOCK_EX)
+        body()
     }
 
     /// On `queue` only.
     private func applyLocked(_ newPercent: Int, done: @escaping (Int) -> Void) {
         percentValue = clampGain(newPercent)
         let raw = Int((Double(percentValue) / 100 * Double(maxValue)).rounded())
-        for av in services {
-            writeLuminance(av, value: raw)
-            usleep(20_000)  // some monitors drop back-to-back DDC writes
-        }
         let p = percentValue
+        withBrightnessLock {
+            for av in services {
+                writeLuminance(av, value: raw)
+                usleep(20_000)  // some monitors drop back-to-back DDC writes
+            }
+            // Publish to the shared brightness.json the CLI reads, so a
+            // `loudini brightness up/down` steps from the value the app just
+            // applied instead of a stale cache. Same file+lock as helper/DDC.swift.
+            try? atomicWrite(
+                JSONSerialization.data(withJSONObject: ["percent": p], options: [.sortedKeys]),
+                to: configDir.appendingPathComponent("brightness.json"))
+        }
         DispatchQueue.main.async {
             self.percent = p
             done(p)
@@ -119,11 +162,13 @@ final class DDCBrightness {
             services.append(av)
         }
         // Seed the tracked level from the first display that answers a read.
-        for av in services {
-            if let (current, max) = readLuminance(av) {
-                maxValue = max > 0 ? max : 100
-                percentValue = clampGain(Int((Double(current) / Double(maxValue) * 100).rounded()))
-                break
+        withBrightnessLock {
+            for av in services {
+                if let (current, max) = readLuminance(av) {
+                    maxValue = max > 0 ? max : 100
+                    percentValue = clampGain(Int((Double(current) / Double(maxValue) * 100).rounded()))
+                    break
+                }
             }
         }
         NSLog("Loudini: DDC external displays=%d brightness=%d%% (max=%d)",

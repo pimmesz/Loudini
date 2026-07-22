@@ -24,11 +24,19 @@ export function ensureHelper(log: (m: string) => void): void {
   }
   child = spawn(HELPER, [], { stdio: 'ignore' });
   child.on('exit', (code, signal) => {
-    // Exit 0 is routine: the daemon's flock makes a redundant spawn quit
-    // immediately when a LaunchAgent/menu-bar daemon already runs.
+    // Drop the handle so the next ensureHelper respawns instead of treating a
+    // dead child as alive. Exit 0 is routine: the daemon's flock makes a
+    // redundant spawn quit immediately when another daemon already runs.
+    child = undefined;
     if (code !== 0) log(`Loudini: helper exited (${code ?? `signal ${signal}`}); respawns on next action.`);
   });
-  child.on('error', (err) => log(`Loudini: helper failed to start: ${err.message}`));
+  child.on('error', (err) => {
+    // A spawn failure emits 'error' with NO following 'exit', so exitCode and
+    // signalCode both stay null — the liveness guard would read that as alive
+    // and never retry. Clear the handle so the next action respawns.
+    child = undefined;
+    log(`Loudini: helper failed to start: ${err.message}`);
+  });
 }
 
 export function stopHelper(): void {

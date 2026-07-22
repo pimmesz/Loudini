@@ -177,6 +177,22 @@ func writeControl(_ c: Control) throws {
     try atomicWrite(data, to: controlURL)
 }
 
+/// Hold an exclusive cross-process lock around a control.json read-modify-write,
+/// so overlapping writers (the daemon's publishGain, the CLI, and the menu-bar
+/// app) don't lose each other's updates. The atomic rename in writeControl stops
+/// a torn file but not a lost update — a per-app override set between another
+/// writer's read and its rename would be silently dropped without this. Mirrors
+/// DDC.withLock (brightness.lock). Fail-open: proceed unlocked if the lock can't
+/// be taken.
+func withControlLock<T>(_ body: () throws -> T) rethrows -> T {
+    try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+    let fd = open(configDir.appendingPathComponent("control.lock").path, O_CREAT | O_RDWR, 0o644)
+    guard fd >= 0 else { return try body() }
+    defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
+    flock(fd, LOCK_EX)
+    return try body()
+}
+
 /// Read-modify-write operations shared by the CLI and the menu-bar app.
 /// Semantics mirror plugin/src/control.ts exactly: clamp 0-100, nudge also un-mutes.
 enum ControlOps {
@@ -189,27 +205,33 @@ enum ControlOps {
     /// delta itself is clamped to ±100 first so extreme values can't overflow Int.
     @discardableResult
     static func nudge(_ delta: Int) throws -> Control {
-        var c = current()
-        c.gain = clampGain(c.gain + min(100, max(-100, delta)))
-        c.muted = false
-        try writeControl(c)
-        return c
+        try withControlLock {
+            var c = current()
+            c.gain = clampGain(c.gain + min(100, max(-100, delta)))
+            c.muted = false
+            try writeControl(c)
+            return c
+        }
     }
 
     @discardableResult
     static func toggleMute() throws -> Control {
-        var c = current()
-        c.muted.toggle()
-        try writeControl(c)
-        return c
+        try withControlLock {
+            var c = current()
+            c.muted.toggle()
+            try writeControl(c)
+            return c
+        }
     }
 
     @discardableResult
     static func set(gain: Int) throws -> Control {
-        var c = current()
-        c.gain = clampGain(gain)
-        try writeControl(c)
-        return c
+        try withControlLock {
+            var c = current()
+            c.gain = clampGain(gain)
+            try writeControl(c)
+            return c
+        }
     }
 
     // MARK: per-app overrides (Phase 3) — read-modify-write control.json's `apps`
@@ -219,33 +241,39 @@ enum ControlOps {
 
     @discardableResult
     static func setApp(_ bundleID: String, gain: Int) throws -> Control {
-        var c = current()
-        guard !bundleID.isEmpty else { return c }
-        var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
-        o.gain = clampGain(gain)
-        c.apps[bundleID] = o
-        try writeControl(c)
-        return c
+        try withControlLock {
+            var c = current()
+            guard !bundleID.isEmpty else { return c }
+            var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
+            o.gain = clampGain(gain)
+            c.apps[bundleID] = o
+            try writeControl(c)
+            return c
+        }
     }
 
     @discardableResult
     static func toggleAppMute(_ bundleID: String) throws -> Control {
-        var c = current()
-        guard !bundleID.isEmpty else { return c }
-        var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
-        o.muted.toggle()
-        c.apps[bundleID] = o
-        try writeControl(c)
-        return c
+        try withControlLock {
+            var c = current()
+            guard !bundleID.isEmpty else { return c }
+            var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
+            o.muted.toggle()
+            c.apps[bundleID] = o
+            try writeControl(c)
+            return c
+        }
     }
 
     /// "Reset all apps to 100%" — clears the whole `apps` map so every app rides
     /// master only again. Master gain/mute are untouched.
     @discardableResult
     static func resetApps() throws -> Control {
-        var c = current()
-        c.apps = [:]
-        try writeControl(c)
-        return c
+        try withControlLock {
+            var c = current()
+            c.apps = [:]
+            try writeControl(c)
+            return c
+        }
     }
 }

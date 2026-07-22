@@ -607,12 +607,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: per-app rows (Phase 3)
 
-    /// A per-row key that's unique across the roster. Scoping by pid keeps two
-    /// entries that share a bundle id (or share the empty "" of bundle-less
-    /// sources) from colliding in `appRows` — a collision would overwrite one
-    /// row's handle and orphan its menu item on the next update/removal.
+    /// A per-row key that's stable across roster refreshes. The daemon collapses
+    /// each bundle to ONE roster entry keyed by bundle id, so bundle-ful apps key
+    /// by bundle id alone — folding the pid in would flap when a background helper
+    /// (e.g. a Chrome renderer) churns and tear out a row mid-drag. Bundle-less
+    /// sources (empty "") have no stable id, so they still scope by pid — the
+    /// daemon keys them the same way, so they can't collide either.
     private static func rowKey(_ a: AppEntry) -> String {
-        a.bundleID.isEmpty ? "pid:\(a.pid)" : "\(a.bundleID)#\(a.pid)"
+        a.bundleID.isEmpty ? "pid:\(a.pid)" : a.bundleID
     }
 
     /// Reconcile the per-app rows with the daemon's roster. Reuses existing row
@@ -1012,10 +1014,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
             p.arguments = ["reset", "Accessibility",
                            Bundle.main.bundleIdentifier ?? "gg.pim.loudini.menubar"]
-            p.standardOutput = Pipe()
-            p.standardError = Pipe()
-            try? p.run()
-            p.waitUntilExit()
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            // Bounded: even if tccutil wedges, the timeout fires and the key-tap
+            // rebuild below still runs instead of being stranded behind waitUntilExit.
+            _ = Self.runBounded(p)
             DispatchQueue.main.async {
                 guard let self, !self.isQuitting else { return }
                 self.keyTap?.stop()
@@ -1084,15 +1087,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Run a Process with a wall-clock deadline: terminate it if it outlives the
+    /// timeout, so a wedged utility can't strand this background worker thread in
+    /// waitUntilExit forever. Output goes to /dev/null (callers use only the exit
+    /// status), so an unread pipe can't fill and block either. Returns the exit
+    /// status, or nil if it never started or had to be killed.
+    private static func runBounded(_ p: Process, timeout: TimeInterval = 5) -> Int32? {
+        do { try p.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate() }
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+
     private static func runLaunchctl(_ args: [String]) -> Int32 {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         p.arguments = args
-        p.standardOutput = Pipe()
-        p.standardError = Pipe()
-        do { try p.run() } catch { return -1 }
-        p.waitUntilExit()
-        return p.terminationStatus
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        return runBounded(p) ?? -1
     }
 
     /// True when any of OUR loudini-helper processes is up (scoped to this
@@ -1103,11 +1118,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         p.arguments = ["-U", "\(getuid())", "-x", "loudini-helper"]
-        p.standardOutput = Pipe()
-        p.standardError = Pipe()
-        do { try p.run() } catch { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        return runBounded(p) == 0
     }
 
     private func spawnDaemon() {
@@ -1141,11 +1154,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func daemonLogHandle() -> FileHandle? {
         let url = configDir.appendingPathComponent("daemon.log")
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
-        handle.seekToEndOfFile()
-        return handle
+        // O_APPEND so every write atomically lands at EOF. launchd opens this same
+        // daemon.log O_APPEND for its agent daemon; a fixed-offset FileHandle
+        // (seekToEndOfFile) would let the two clobber each other during a handoff.
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard fd >= 0 else { return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 }

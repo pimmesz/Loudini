@@ -29,8 +29,18 @@ ensureHelper(log);
 
 // Faces track the live level no matter which frontend changes it (CLI,
 // menu-bar app, volume keys) — status.json is the shared ground truth.
+// Skip a tick while the previous refresh is still draining, so a slow
+// (backpressured) Stream Deck WebSocket can't pile up un-awaited repaints.
+let refreshing = false;
 setInterval(() => {
-  for (const a of actions) void a.refreshAll();
+  if (refreshing) return;
+  refreshing = true;
+  // allSettled (not all): clear the flag only once EVERY refresh has drained —
+  // Promise.all rejects on the first failure and would re-open the gate while
+  // other repaints are still pending. allSettled also swallows per-key rejections.
+  void Promise.allSettled(actions.map((a) => a.refreshAll())).finally(() => {
+    refreshing = false;
+  });
 }, 1000);
 
 await streamDeck.connect();

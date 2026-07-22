@@ -65,6 +65,21 @@ enum DDC {
         return body()
     }
 
+    /// Like withLock but NON-blocking: returns nil instead of waiting when the
+    /// lock is already held. Used only for relative nudges — a held/autorepeated
+    /// key spawns one process per repeat, and queuing them behind a slow
+    /// per-display write piles up blocked processes. If another invocation holds
+    /// the lock it's already moving brightness the same way, so skipping this
+    /// step is correct and caps in-flight work at one. Fail-open on lock error.
+    private static func tryWithLock<T>(_ body: () -> T) -> T? {
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o644)
+        guard fd >= 0 else { return body() }   // can't open the lock → proceed unlocked
+        defer { close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 { return nil }   // held → skip this redundant step
+        return body()
+    }
+
     /// Cached last-set percent, or nil if none yet.
     private static func cachedPercent() -> Int? {
         guard let data = try? Data(contentsOf: cacheURL),
@@ -110,11 +125,12 @@ enum DDC {
 
     @discardableResult
     static func nudge(_ delta: Int) -> Int? {
-        // Whole read-modify-write under one lock. Base the step on the cached
-        // last-set value (consistent under a held key), reading the monitor only
-        // when there's no cache yet — otherwise the latency-bound read lets
-        // overlapping presses collapse into one step.
-        withLock { applyUnlocked((cachedPercent() ?? currentUnlocked()) + delta) }
+        // Whole read-modify-write under one NON-blocking lock. Base the step on
+        // the cached last-set value (consistent under a held key), reading the
+        // monitor only when there's no cache yet. If another invocation already
+        // holds the lock, skip rather than queue a blocked process — return the
+        // cached level so the caller still prints a sane value.
+        tryWithLock { applyUnlocked((cachedPercent() ?? currentUnlocked()) + delta) } ?? cachedPercent()
     }
 
     // MARK: DDC/CI over I2C (chip 0x37, register 0x51)
