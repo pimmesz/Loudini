@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Volume keys for Mac audio interfaces that ignore them — Loudini</title>
+<title>Volume keys for Mac audio interfaces that ignore them · Loudini</title>
 <meta name="description" content="Mac volume keys dead on a Focusrite Scarlett or other fixed-level interface? Loudini is a free, open-source software master volume your keys can drive.">
 <link rel="canonical" href="https://loudini.app/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Loudini — the master volume macOS wouldn't give you">
-<meta property="og:description" content="Your volume keys do nothing on a Focusrite Scarlett or other fixed-level interface. Loudini adds a real software volume you can drive from the keyboard — with a proper HUD. Free, open source, fails open by design.">
+<meta property="og:title" content="Loudini: the master volume macOS wouldn't give you">
+<meta property="og:description" content="Your volume keys do nothing on a Focusrite Scarlett or other fixed-level interface. Loudini adds a real software volume you can drive from the keyboard, with a proper HUD. Free, open source, and it fails open.">
 <meta property="og:url" content="https://loudini.app/">
 <meta property="og:site_name" content="Loudini">
 <!-- Share card. Absolute URLs are required: scrapers do not resolve relative ones.
@@ -16,9 +16,9 @@
 <meta property="og:image" content="https://loudini.app/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Loudini — the master volume macOS wouldn't give you">
+<meta property="og:image:alt" content="Loudini: the master volume macOS wouldn't give you">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Loudini — the master volume macOS wouldn't give you">
+<meta name="twitter:title" content="Loudini: the master volume macOS wouldn't give you">
 <meta name="twitter:description" content="Volume keys do nothing on your Scarlett or other fixed-level interface? Loudini adds a real software volume your keys can drive. Free & open source.">
 <meta name="twitter:image" content="https://loudini.app/og.png">
 <meta name="color-scheme" content="dark">
@@ -30,7 +30,7 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Cdefs%3E%3CradialGradient id='b' cx='72%25' cy='24%25' r='96%25'%3E%3Cstop offset='0' stop-color='%231B2054'/%3E%3Cstop offset='.5' stop-color='%230E1232'/%3E%3Cstop offset='1' stop-color='%2307091B'/%3E%3C/radialGradient%3E%3ClinearGradient id='m' x1='220' y1='720' x2='760' y2='270' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23FF3CAC'/%3E%3Cstop offset='.48' stop-color='%23865DFF'/%3E%3Cstop offset='1' stop-color='%2320D9FF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='51' y='51' width='922' height='922' rx='207' fill='url(%23b)'/%3E%3Cg fill='url(%23m)'%3E%3Crect x='182' y='371' width='120' height='282' rx='55'/%3E%3Crect x='362' y='202' width='120' height='620' rx='55'/%3E%3Crect x='542' y='286' width='120' height='451' rx='55'/%3E%3Crect x='722' y='385' width='120' height='254' rx='55'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <!-- Entity markup for search and answer engines. Deliberately no aggregateRating/review
-     (no legitimate source — fabricating one is a manual-action risk) and no softwareVersion:
+     (no legitimate source, and fabricating one is a manual-action risk) and no softwareVersion:
      bump-version.sh rewrites exactly one version pattern, so a sixth version home would
      silently go stale. Every field here stays true across releases. -->
 <script type="application/ld+json">
@@ -46,13 +46,13 @@
       "processorRequirements": "Apple Silicon",
       "url": "https://loudini.app/",
       "downloadUrl": "https://github.com/pimmesz/Loudini/releases/latest/download/Loudini.dmg",
-      "description": "A menu-bar app that gives macOS audio outputs which ignore the volume keys — Focusrite Scarlett and other fixed-level audio interfaces or USB DACs — a real software master volume the keyboard can drive. Driverless Core Audio process tap: no drivers, no kexts, fails open by design.",
+      "description": "A menu-bar app that gives macOS audio outputs that ignore the volume keys (the Focusrite Scarlett and other fixed-level audio interfaces or USB DACs) a real software master volume the keyboard can drive. It uses a Core Audio process tap, so it needs no drivers or kexts, and it fails open: if the daemon dies, macOS restores normal audio.",
       "featureList": [
         "Software master volume driven by the Mac volume keys",
         "Per-app volume levels under the master",
         "F1/F2 brightness for external monitors over DDC/CI",
         "Scriptable loudini CLI",
-        "Fails open — if the daemon dies, macOS restores normal audio"
+        "Fails open: if the daemon dies, macOS restores normal audio"
       ],
       "license": "https://opensource.org/licenses/MIT",
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" },
@@ -230,7 +230,7 @@
   }
   .duo strong { color: var(--t1); font-weight: 530; }
 
-  /* watermark footer — the one indulgence */
+  /* watermark footer: the one indulgence */
   footer { margin-top: 5rem; position: relative; }
   footer .meta {
     display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem;
@@ -282,8 +282,8 @@
 
       <h1 class="rise d2">The master volume macOS wouldn't give you.</h1>
       <p class="sub rise d3">Your Mac's volume keys do nothing on a <strong>Focusrite Scarlett</strong> or
-      any other fixed-level <strong>audio interface</strong> or USB DAC — just the crossed-out HUD. Loudini
-      gives those outputs a real software volume your keys can actually drive, with its own HUD. Same for
+      any other fixed-level <strong>audio interface</strong> or USB DAC. You get the crossed-out HUD instead.
+      Loudini gives those outputs a real software volume your keys can drive, with its own HUD. Same for
       external-monitor brightness.</p>
       <div class="cta rise d3">
         <a class="btn" href="https://github.com/pimmesz/Loudini/releases/latest/download/Loudini.dmg">Download for macOS</a>
@@ -294,7 +294,7 @@
 
     <div class="stage rise d4">
       <div class="frame">
-        <div class="menu" role="group" aria-label="Loudini's menu bar dropdown, recreated — the volume slider works">
+        <div class="menu" role="group" aria-label="Loudini's menu bar dropdown, recreated. The volume slider works.">
           <div class="hrow">
             <svg class="mlogo" viewBox="0 0 1024 1024" aria-hidden="true">
               <g fill="url(#mk)">
@@ -342,7 +342,7 @@
     </div>
 
     <section style="text-align: center;">
-      <p class="duo"><strong>Your audio interface already sounds right.</strong> Now give it the controls it deserves.</p>
+      <p class="duo"><strong>Your audio interface already sounds right.</strong> It just needs a volume control your keyboard can reach.</p>
       <a class="btn" href="https://github.com/pimmesz/Loudini" style="margin-top: 1.6rem;">Read the full docs</a>
     </section>
   </main>
