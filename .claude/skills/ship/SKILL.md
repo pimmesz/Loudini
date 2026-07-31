@@ -38,7 +38,7 @@ run it when the diff touches `scripts/`.
   the repo first (`.gitignore` only covers `menubar/Loudini.app/`, so an in-repo backup
   would dirty the tree and trip `release.sh`'s clean check).
 - **The contract is frozen.** `~/.config/loudini/control.json` and `status.json` are
-  declared "the universal API — do not break it" in BUILD.md. `status.json`'s `apps[]`
+  declared "the universal API: do not break it" in BUILD.md. `status.json`'s `apps[]`
   is keyed on `bundleID`; changing a key silently drops users' saved per-app volumes.
   `plugin/src/control.ts` mirrors the shape BY HAND — a field change must land there too.
 - **The daemon must stay fail-open.** No change may leave a path where a crash or a

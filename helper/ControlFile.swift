@@ -1,13 +1,19 @@
 // ControlFile.swift — the Loudini control-file contract, shared by every Swift frontend
 // (the loudini-helper daemon/CLI and the menu-bar app; plugin/src/control.ts mirrors it in TS).
 //
-// control.json — {"gain": <int 0-100>, "muted": <bool>}. Any frontend WRITES this; the daemon
-//                polls it every 100 ms. Writes MUST be atomic (unique temp file in the same
-//                directory, then rename(2)) because several frontends may write concurrently
-//                and the daemon may read mid-write. Concurrent read-modify-writes are
-//                last-writer-wins by design; the file itself can never tear.
-// status.json  — {"gain","muted","running","device"}. The daemon writes it (atomically) on
-//                every change; frontends READ it to display the live level.
+// control.json: {"gain": <int 0-100>, "muted": <bool>,
+//                "apps"?: {"<bundleID>": {"gain": <int 0-100>, "muted": <bool>}}}. Any frontend
+//                WRITES this; the daemon polls it every 100 ms. Writes MUST be atomic (unique
+//                temp file in the same directory, then rename(2)) because several frontends may
+//                write concurrently and the daemon may read mid-write. A frontend that does not
+//                own `apps` must merge it forward, never replace the document, or it wipes every
+//                per-app override. Wrap the read-modify-write in withControlLock (below): the
+//                rename stops a torn file but not a lost update.
+// status.json:   {"gain","muted","running","pipeline","device","pid","reason"?,"apps"}, see
+//                `struct Status` below, which is the contract. The daemon writes it (atomically)
+//                on every change; frontends READ it to display the live level. `pid` is not a
+//                Status field: readStatus() uses it to force running:false when that process is
+//                gone, so a hard-killed daemon cannot leave a status claiming it still works.
 
 import Foundation
 

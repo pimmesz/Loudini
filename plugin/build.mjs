@@ -48,7 +48,6 @@ if (existsSync(helperSrc)) {
 } else {
   console.warn(`WARNING: daemon binary missing at ${helperSrc}`);
   console.warn('The plugin will load but cannot control audio. Build the daemon with:');
-  console.warn('  cd helper && swiftc -O -parse-as-library -o loudini-helper \\');
-  console.warn('    loudini-helper.swift ControlFile.swift Conflicts.swift DDC.swift \\');
-  console.warn('    -framework CoreAudio -framework AudioToolbox -framework Foundation -framework IOKit');
+  // Absolute, because pnpm runs this from plugin/ where a repo-relative path would not resolve.
+  console.warn(`  ${join(here, '..', 'menubar', 'build-app.sh')}   # the one build command; it pins the macOS 14.4 floor`);
 }

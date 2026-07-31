@@ -2,10 +2,12 @@
 //
 // Talks to every external display's DCPAVServiceProxy via the IOAVService I2C
 // interface (private but long-stable — the same path MonitorControl and m1ddc
-// use) and writes VCP 0x10 (luminance). No daemon and no files: the monitor
-// itself holds the state. All displays move together (per-display control is
-// a later refinement). Degrades to isAvailable=false on Intel Macs, if the
-// API moves, or when no external DDC display is attached.
+// use) and writes VCP 0x10 (luminance). No daemon: the monitor itself holds the
+// true level, mirrored into ~/.config/loudini/brightness.json under
+// brightness.lock so `loudini brightness` (helper/DDC.swift) steps from the same
+// value instead of a stale cache. All displays move together (per-display
+// control is a later refinement). Degrades to isAvailable=false on Intel Macs,
+// if the API moves, or when no external DDC display is attached.
 
 import AppKit
 import IOKit

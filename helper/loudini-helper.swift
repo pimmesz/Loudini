@@ -14,10 +14,13 @@
 //            "apps": {"<bundleID>": {"gain": 0-100, "muted": bool}, ...}}  (apps optional)
 //           polled every 100ms; master multiplier = muted ? 0 : gain/100,
 //           per-app multiplier applied pre-master (effective = master × app).
-// Status:   ~/.config/loudini/status.json    {"gain","muted","running","device","apps"}
+// Status:   ~/.config/loudini/status.json
+//           {"gain","muted","running","pipeline","device","pid","reason"?,"apps"}
 //           written atomically at startup, on every change, and on shutdown
 //           (running:false). "apps" is the live roster of processes producing
-//           audio right now (kAudioProcessPropertyIsRunningOutput) — read-only.
+//           audio right now (kAudioProcessPropertyIsRunningOutput), read-only.
+//           Readers must treat the file as running:false once "pid" is gone,
+//           or a hard-killed daemon leaves a status claiming it still works.
 //
 // Fail-open: if this process dies for any reason, coreaudiod destroys the tap +
 // aggregate (they are private objects owned by this HAL client) and audio
@@ -26,10 +29,13 @@
 // Build:  menubar/build-app.sh  — the single source of the build command (source list,
 //         frameworks, and the -target that pins the macOS 14.4 floor). Building by hand
 //         risks omitting a file the build adds.
-// Usage:  loudini-helper [--device <UID>]                          (daemon)
-//         loudini-helper up|down [step] | mute | set <0-100> | get (CLI — writes control.json
-//                                                                  and exits; never touches
-//                                                                  Core Audio)
+// Usage:  loudini-helper [--device <UID>]   (daemon)
+//         loudini-helper --help             (prints usageText, the full subcommand list:
+//                                            up|down|mute|set|get|apps|app|doctor|brightness)
+//         The volume verbs (up/down/mute/set, apps reset, app <id> set|mute) write control.json
+//         and exit without touching Core Audio. get/apps/app <id> get only read: status.json
+//         first, control.json as the fallback when no daemon has written one.
+//         doctor shells out to pgrep/launchctl, and brightness drives IOKit/DDC directly.
 // Debug:  LOUDINI_METER=1 loudini-helper   (logs per-second in/out RMS)
 
 import Foundation
@@ -520,7 +526,7 @@ final class Pipeline {
     }
 }
 
-// MARK: - live "producing audio" roster (Phase 1: read-only, published to status.json)
+// MARK: - live "producing audio" roster (identity only, published to status.json)
 
 /// Watches Core Audio's process objects and maintains the short list of apps
 /// that are actually rendering output right now — the whole point of the
@@ -534,8 +540,9 @@ final class Pipeline {
 /// stops so a paused track or inter-song gap doesn't make it flicker; a 1 s
 /// timer expires the lingering rows. Publishes an [AppEntry] snapshot on change.
 ///
-/// Phase 1 is read-only — per-app gain/muted are always 100/false here; the
-/// render path is untouched. Runs entirely on its own serial queue.
+/// Identity only: gain/muted are always 100/false here. Engine.appsForStatus()
+/// overlays the applied per-app values from control.apps, for the taps the
+/// pipeline actually built. Runs entirely on its own serial queue.
 final class AppRoster {
     /// Grace window: how long a row survives after IsRunningOutput goes false,
     /// so pauses and gaps between tracks don't drop and re-add it. Tunable.
@@ -693,7 +700,8 @@ final class AppRoster {
     }
 
     private func publishIfChanged() {
-        // Phase 1: gain/muted are always the defaults (no render-path override yet).
+        // Identity only: Engine.appsForStatus() overlays the applied per-app
+        // gain/muted from control.apps before the roster reaches status.json.
         let snapshot = entries.values
             .map { AppEntry(bundleID: $0.bundleID, name: $0.name, pid: Int($0.pid),
                             gain: 100, muted: false, active: $0.active) }
@@ -809,7 +817,8 @@ final class Engine {
     /// straight away is not something a fast rebuild loop fixes.
     private static let stallRebuildCooldown: TimeInterval = 300.0
     /// Live "producing audio" roster, maintained by AppRoster and published in
-    /// status.json. Read-only in Phase 1 (no render-path effect).
+    /// status.json. Identity only; appsForStatus() overlays the applied per-app
+    /// gain/muted before publishing.
     private var roster: AppRoster?
     private var currentApps: [AppEntry] = []
 

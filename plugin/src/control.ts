@@ -4,8 +4,12 @@ import { join } from 'node:path';
 
 /**
  * The plugin ↔ helper contract (two JSON files in ~/.config/loudini):
- *  - control.json  — plugin WRITES the desired {gain 0-100, muted}; the helper reads it and applies it.
- *  - status.json   — helper WRITES {gain, muted, running, device}; the plugin reads it for display.
+ *  - control.json: the plugin WRITES the desired master {gain 0-100, muted} and merges every key it
+ *    does not own (notably the per-app `apps` map); the helper reads it and applies it.
+ *  - status.json: the helper WRITES {gain, muted, running, pipeline, device, pid, reason?, apps};
+ *    the plugin reads it for display. `pid` is not on the Status interface: readStatus() probes it
+ *    and forces running:false when that process is gone, so a hard-killed helper cannot read as
+ *    healthy.
  * File-based on purpose: dead simple, survives either side restarting, no socket lifecycle.
  */
 const DIR = join(homedir(), '.config', 'loudini');

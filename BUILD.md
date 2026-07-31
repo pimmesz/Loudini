@@ -1,24 +1,27 @@
-# Loudini — build plan (agent brief)
+# Loudini build plan (agent brief)
 
+> **Status: all four phases shipped (0.1.0, now 0.4.1).** This file is the architecture and contract
+> reference, not a to-do list. The build plan below is kept as the record of how it was assembled.
+>
 > This file is a self-contained brief for an AI agent working **inside `~/Personal/Loudini`**.
-> It has no memory of the design conversation — everything needed is here. Read it top to bottom
+> It has no memory of the design conversation, and everything needed is here. Read it top to bottom
 > before touching code.
 
 ## What Loudini is
 
 A free, open-source **macOS 14.4+** utility that adds a software **master output volume** to any Mac
-audio output. It exists because many pro audio interfaces — the **Focusrite Scarlett 2i2** and most
-fixed-level interfaces/DACs — expose no software or OS volume at all: the macOS volume keys show the
+audio output. It exists because many pro audio interfaces (the **Focusrite Scarlett 2i2** and most
+fixed-level interfaces/DACs) expose no software or OS volume at all: the macOS volume keys show the
 crossed-out "no volume" HUD and do nothing. Loudini gives those outputs a real, keyboard-drivable
 volume.
 
 **The engine** is a driverless Core Audio **process tap** (already built + verified): a Swift daemon
 taps every output-producing process except itself, mutes their direct path (`.mutedWhenTapped`), and
 re-renders the mix to the current default output through an IOProc that multiplies each sample by a
-software gain. It **fails open** — if the daemon dies, `coreaudiod` tears down the private tap/aggregate
+software gain. It **fails open**: if the daemon dies, `coreaudiod` tears down the private tap/aggregate
 and audio returns to normal. No driver, no admin, no kext.
 
-## The architecture — one core, many thin frontends (read this twice)
+## The architecture: one core, many thin frontends (read this twice)
 
 The **product is the daemon + a one-file control contract.** Every user-facing thing is a thin frontend
 that writes that one file. The daemon has no idea who wrote it.
@@ -34,72 +37,86 @@ that writes that one file. The daemon has no idea who wrote it.
                                                                     (Core Audio process tap)
 ```
 
-**Build ALL of it in this pass.** The daemon is already done; build the remaining three frontends —
-CLI + LaunchAgent, menu-bar app, and Stream Deck plugin — together so Loudini ships complete. The phases
-below are a **dependency order**, not a stopping point: the CLI's atomic-write helper is reused by the
-menu-bar app, and the daemon binary is shipped by both the LaunchAgent and the Stream Deck plugin. Do
-them in order because each builds on the last, but the deliverable is the whole thing.
+**All of it shipped in one pass.** The daemon came first; the remaining three frontends (CLI +
+LaunchAgent, menu-bar app, and Stream Deck plugin) landed together so Loudini shipped complete. The
+phases below were a **dependency order**, not a stopping point: the menu-bar app reuses the CLI's
+atomic-write helper, and both the LaunchAgent and the Stream Deck plugin ship the daemon binary.
 
 | # | Piece | Serves | Status |
 |---|-------|--------|--------|
 | 1 | Daemon (the tap engine) | everything | ✅ done, verified |
-| 2 | **CLI subcommands + LaunchAgent** | anyone — bind volume keys via any hotkey tool | build |
-| 3 | Menu-bar app (grabs volume keys **+ the visual layer**) | everyone — zero-config + on-screen feedback | build |
-| 4 | Stream Deck plugin (thin wrapper) | Stream Deck owners | build |
+| 2 | **CLI subcommands + LaunchAgent** | anyone, bind volume keys via any hotkey tool | ✅ shipped 0.1.0 |
+| 3 | Menu-bar app (grabs volume keys **+ the visual layer**) | everyone: zero-config + on-screen feedback | ✅ shipped 0.1.0 |
+| 4 | Stream Deck plugin (thin wrapper) | Stream Deck owners | ✅ shipped 0.1.0 |
 
 ## How to work (this brief is written for fable)
 
-- **You are strongest at fast, native macOS/Swift iteration and at *measuring* what you build** — you
+- **You are strongest at fast, native macOS/Swift iteration and at *measuring* what you build.** You
   wrote this daemon and proved it with RMS metering. Work the same way: after every change, **verify by
-  measurement and by ear**, don't assume. Prototype quickly, instrument, confirm.
+  measurement and by ear** instead of assuming. Prototype quickly, instrument, confirm.
 - **Use GPT-5.6 Codex as an independent adversarial reviewer** for the risky code (see the
   *Cross-review* section). You are fast; a second, different strong model catching a real-time-safety or
-  concurrency bug is worth more than a third self-review. This is a genuine cross-check, not a rubber stamp.
-- Keep the daemon **fail-open** at all times — no change may leave a path where a crash mutes audio permanently.
+  concurrency bug is worth more than a third self-review. This is a genuine cross-check, not a rubber
+  stamp.
+- Keep the daemon **fail-open** at all times: no change may leave a path where a crash mutes audio
+  permanently.
 
 ## Read the existing scaffold first
 
-- `helper/loudini-helper.swift` — daemon source. Note the existing arg parsing (`--device <UID>`, `-h`)
+- `helper/loudini-helper.swift`: daemon source. Note the existing arg parsing (`--device <UID>`, `-h`)
   near the bottom, and the control/status file IO. You'll extend the arg parsing in Phase 1.
-- `helper/loudini-helper` — compiled arm64 binary (already built). Rebuild it with
-  `menubar/build-app.sh` — the single source of the build command (source list, frameworks,
-  and the `-target` that pins the macOS 14.4 floor); building it by hand risks omitting a file.
-- `plugin/src/control.ts` — the TS side of the contract. Exports `readControl()`/`writeControl(c)`/
+- `helper/loudini-helper`: the compiled arm64 daemon+CLI binary. **Gitignored, so a fresh clone has
+  none. Build it first with `menubar/build-app.sh`**, the single source of the build command (source
+  list, frameworks, and the `-target` that pins the macOS 14.4 floor); building it by hand risks
+  omitting a file. Until it exists, `scripts/install-cli.sh` and `scripts/install-daemon.sh` exit 1
+  and `plugin/build.mjs` warns.
+- `plugin/src/control.ts`: the TS side of the contract. Exports `readControl()`/`writeControl(c)`/
   `readStatus()`/`nudge(delta)`/`toggleMute()`. Mirror this behavior in the Swift CLI so both frontends
-  agree exactly (clamp 0–100; `nudge`/`up`/`down` also **un-mutes**).
-- `plugin/src/actions.ts`, `plugin/src/helper.ts` — the Stream Deck frontend (Phase 3).
-- `plugin/gg.pim.loudini.sdPlugin/manifest.json` — Elgato manifest, `UUID gg.pim.loudini`.
+  agree exactly (clamp 0-100; `nudge`/`up`/`down` also **un-mutes**).
+- `plugin/src/actions.ts`, `plugin/src/helper.ts`: the Stream Deck frontend (Phase 3).
+- `plugin/gg.pim.loudini.sdPlugin/manifest.json`: Elgato manifest, `UUID gg.pim.loudini`.
 
-## The contract (the universal API — do not break it)
+## The contract (the universal API: do not break it)
 
-- **`~/.config/loudini/control.json`** — `{"gain": <int 0-100>, "muted": <bool>, "apps"?: {"<bundleID>":
+- **`~/.config/loudini/control.json`** holds `{"gain": <int 0-100>, "muted": <bool>, "apps"?: {"<bundleID>":
   {"gain": <int 0-100>, "muted": <bool>}}}`. Any frontend WRITES this. The daemon reads it every 100 ms
   (lenient parse: bad/partial JSON keeps the last good value).
-  **A writer that owns only `gain`/`muted` MUST read-modify-write, never replace the document** —
-  emitting just `{"gain":…,"muted":…}` erases the `apps` map and every per-app override with it.
-- **`~/.config/loudini/status.json`** — `{"gain","muted","running","pipeline","device","pid","reason"?,"apps"}`.
-  `pipeline` is the capture pipeline's health (a daemon can be `running:true` with `pipeline:false` when the
-  System Audio Recording grant is missing) and `pid` is what readers probe to catch a hard-killed daemon —
-  treat the file as `running:false` when that process is gone. Omitting either is how a frontend reports a
-  dead engine as fully working. The daemon WRITES
-  this atomically on every change (and `running:false` on shutdown). Frontends READ it to show the live
-  level. `apps` is the live read-only roster of processes producing audio right now
-  (`kAudioProcessPropertyIsRunningOutput`): `[{bundleID,name,pid,gain,muted,active}]` — see
-  `SPEC-per-app-volume.md`. `loudini apps` prints it.
+  **A writer that owns only `gain`/`muted` MUST read-modify-write, never replace the document.**
+  Emitting just `{"gain":…,"muted":…}` erases the `apps` map and every per-app override with it.
+- **`~/.config/loudini/status.json`** holds `{"gain","muted","running","pipeline","device","pid","reason"?,"apps"}`.
+  `pipeline` is the capture pipeline's health (a daemon can be `running:true` with `pipeline:false` when
+  the System Audio Recording grant is missing). `pid` is what readers probe to catch a hard-killed
+  daemon: treat the file as `running:false` when that process is gone. Omitting either is how a frontend
+  reports a dead engine as fully working. The daemon WRITES this atomically on every change (and
+  `running:false` on shutdown). Frontends READ it to show the live level. `apps` is the live read-only
+  roster of processes producing audio right now (`kAudioProcessPropertyIsRunningOutput`):
+  `[{bundleID,name,pid,gain,muted,active}]`. See `SPEC-per-app-volume.md`. `loudini apps` prints it.
+- **`~/.config/loudini/brightness.json`** holds `{"percent": <int 0-100>}`. The single shared source of
+  truth for external-display brightness: the CLI (`helper/DDC.swift`) and the menu-bar app
+  (`menubar/DDCBrightness.swift`) both write it under `brightness.lock` on every apply, so a relative
+  step never runs off a stale base. See `DECISIONS.md`.
+- **`~/.config/loudini/control.lock`** guards the read-modify-write itself. The atomic rename stops a
+  torn file but not a lost update: a per-app override written between another writer's read and its
+  rename vanishes. Every Swift frontend wraps its RMW in an exclusive `flock(2)` on this file
+  (`withControlLock` in `ControlFile.swift`). The Node plugin is the documented exception, because
+  Node has no `flock(2)`: it writes only master `gain`/`muted` and merges the keys it does not own,
+  which narrows the lost-update window but does not close it. See `DECISIONS.md`.
+  `brightness.lock` plays the same role for `brightness.json`.
 - **All writes to `control.json` MUST be atomic** (write a temp file in the same dir, then `rename()`),
   because up to three frontends may write it concurrently and the daemon reads it mid-write. This is the
   #1 thing to get right and the #1 thing to have Codex check.
 
-**Gate:** `scripts/test.sh` — the contract regression tests (`helper/ControlFileTests.swift`). Run it after
-any change to `helper/ControlFile.swift`; CI runs it on every push. It pins the invariants above: per-app
-overrides survive a master-only write, lenient parsing keeps the last good value, gains clamp to 0–100, a
-dead daemon can't claim `running:true`, and `atomicWrite` leaves no `.tmp` behind. It writes to a throwaway
-home via `CFFIXED_USER_HOME` (**not** `$HOME`, which `homeDirectoryForCurrentUser` ignores) so it can never
+**Gate:** `scripts/test.sh`, the contract regression tests (`helper/ControlFileTests.swift`). Run it
+after any change to `helper/ControlFile.swift`; `ci.yml`'s `test` job runs it on every push and PR that
+touches a non-docs path. It pins the invariants above: per-app overrides survive a master-only write,
+lenient parsing keeps the last good value, gains clamp to 0-100, a dead daemon can't claim
+`running:true`, and `atomicWrite` leaves no `.tmp` behind. It writes to a throwaway home via
+`CFFIXED_USER_HOME` (**not** `$HOME`, which `homeDirectoryForCurrentUser` ignores) so it can never
 touch your real `~/.config/loudini`.
 
 ---
 
-## Phase 1 — CLI + LaunchAgent (the unlock)
+## Phase 1: CLI + LaunchAgent (the unlock)
 
 Goal: your friend with a Scarlett and **no Stream Deck** can bind his keyboard's Volume Up/Down/Mute to
 Loudini in two minutes.
@@ -109,16 +126,16 @@ Loudini in two minutes.
 Extend `loudini-helper`'s arg parsing so **one binary does both jobs**:
 
 - `loudini-helper` (no args, or `--device <UID>`) → run the daemon (current behavior, unchanged).
-- `loudini-helper up [step]` → gain += step (default 6), clamp 0–100, **un-mute**, atomic-write `control.json`, exit 0.
+- `loudini-helper up [step]` → gain += step (default 6), clamp 0-100, **un-mute**, atomic-write `control.json`, exit 0.
 - `loudini-helper down [step]` → gain -= step (default 6), clamp, un-mute, atomic-write, exit 0.
 - `loudini-helper mute` → toggle `muted`, atomic-write, exit 0.
 - `loudini-helper set <0-100>` → set gain (clamp), atomic-write, exit 0.
 - `loudini-helper get` → print current level, reading `status.json` if present (ground truth) else
   `control.json`; print e.g. `gain=42 muted=false running=true pipeline=true device="Scarlett 2i2 USB"`; exit 0.
 
-Key point: **the subcommands never touch Core Audio** — they only read/modify/atomic-write `control.json`
-and exit instantly. The already-running daemon applies the change on its next 100 ms poll. This keeps the
-CLI safe, fast, and dependency-free.
+Key point: **the subcommands never touch Core Audio**. They only read/modify/atomic-write
+`control.json` and exit instantly. The already-running daemon applies the change on its next 100 ms
+poll. This keeps the CLI safe, fast, and dependency-free.
 
 ### 1b. Make it callable as `loudini`
 
@@ -129,13 +146,13 @@ warn if `~/.local/bin` isn't on `PATH`). Then users type `loudini up`, etc. Do *
 
 Something must keep the daemon *running* or writes to `control.json` do nothing. Provide:
 
-- `launchd/gg.pim.loudini.plist` — a LaunchAgent that runs `loudini-helper` (daemon mode) with
-  `RunAtLoad` + `KeepAlive`, logging stdout/stderr to `~/.config/loudini/daemon.log`.
-- `scripts/install-daemon.sh` — copies the plist to `~/Library/LaunchAgents/`, `launchctl bootstrap`s /
+- `launchd/gg.pim.loudini.plist`: a LaunchAgent that runs `loudini-helper` (daemon mode) with
+  `RunAtLoad` + `KeepAlive`, and logs stdout/stderr to `~/.config/loudini/daemon.log`.
+- `scripts/install-daemon.sh`: copies the plist to `~/Library/LaunchAgents/`, `launchctl bootstrap`s /
   loads it, and prints the one-time **System Audio Recording** permission note (see Gotchas).
-- `scripts/uninstall-daemon.sh` — `launchctl bootout` + remove the plist (clean teardown).
+- `scripts/uninstall-daemon.sh`: `launchctl bootout` + remove the plist (clean teardown).
 
-Never auto-`launchctl load` without the user running the script themselves — print what it will do.
+Never auto-`launchctl load` without the user running the script themselves. Print what it will do.
 
 ### 1d. Keyboard-binding recipe (docs)
 
@@ -155,7 +172,7 @@ from BetterTouchTool, skhd, or Raycast. This is what makes Loudini usable "in a 
 
 ---
 
-## Phase 2 — Menu-bar app (grabs volume keys + is Loudini's visual layer)
+## Phase 2: Menu-bar app (grabs volume keys + is Loudini's visual layer)
 
 A native macOS menu-bar app in `menubar/` (SwiftUI `MenuBarExtra` or AppKit `NSStatusItem`) that gives
 everyone "my volume keys just work now" with no hotkey tool, **and is the piece that shows how loud
@@ -166,30 +183,30 @@ Loudini currently is.**
 - Install a `CGEventTap` (session tap) for `NSSystemDefined` / `NX_SYSDEFINED` events, handle keycodes
   `NX_KEYTYPE_SOUND_UP` (0) / `NX_KEYTYPE_SOUND_DOWN` (1) / `NX_KEYTYPE_MUTE` (7), **consume** them
   (return `nil` from the callback so macOS doesn't show its useless crossed-out HUD), and call the same
-  atomic `control.json` nudge/mute logic as the CLI (share the code — do not reimplement it).
-- Requires **Accessibility** permission (`AXIsProcessTrusted`) — detect it, guide the user to
+  atomic `control.json` nudge/mute logic as the CLI (share the code, do not reimplement it).
+- Requires **Accessibility** permission (`AXIsProcessTrusted`): detect it, guide the user to
   System Settings → Privacy & Security → Accessibility on first run, degrade gracefully (menu + slider
   still work) if not yet granted.
 - Re-enable the tap on `kCGEventTapDisabledByTimeout`; never block the main thread in the callback.
 - Owns the daemon: spawn it if not running (or defer to the LaunchAgent if installed), and quit cleanly.
-- Well-trodden (SoundSource / BeardedSpice do the same key-tap) — but the real-time and permission edges
+- Well-trodden (SoundSource / BeardedSpice do the same key-tap), but the real-time and permission edges
   are exactly where a second reviewer earns its keep. **Have Codex review the tap.**
 
-### 2b. The visual layer — "how loud is Loudini right now?"
+### 2b. The visual layer: "how loud is Loudini right now?"
 
 This app is where the user *sees* the level. Three surfaces, all driven off `status.json` (the daemon's
-ground truth), so they reflect changes from **any** frontend — CLI, Stream Deck, or this app's own keys:
+ground truth), so they reflect changes from **any** frontend (CLI, Stream Deck, or this app's own keys):
 
-- **Menu-bar indicator** — the status-item icon/title always shows the current level: a small volume
-  glyph whose fill tracks the gain, or a compact `42%` / muted state. Updates whenever `status.json`
-  changes (watch it with a file-system event source or a light poll).
-- **Dropdown slider** — a `0–100` slider bound to the level: dragging it writes `control.json`
+- **Menu-bar indicator**: the status-item icon/title always shows the current level, either a small
+  volume glyph whose fill tracks the gain or a compact `42%` / muted state. Updates whenever
+  `status.json` changes (watch it with a file-system event source or a light poll).
+- **Dropdown slider**: a `0-100` slider bound to the level. Dragging it writes `control.json`
   (atomic), and it also *reflects* external changes. Include a mute toggle and the current output device
   name (from `status.json`).
-- **On-screen HUD** — a transient, borderless, click-through overlay (like macOS's own volume HUD) that
+- **On-screen HUD**: a transient, borderless, click-through overlay (like macOS's own volume HUD) that
   appears for ~1 s on **every** level change and then fades. Because it's triggered by `status.json`
-  changes, pressing a Stream Deck key or running `loudini down` in a terminal shows the HUD too — it's
-  the replacement for the native HUD we suppress in 2a. Keep it lightweight and non-focus-stealing
+  changes, pressing a Stream Deck key or running `loudini down` in a terminal shows the HUD too. It
+  replaces the native HUD we suppress in 2a. Keep it lightweight and non-focus-stealing
   (`NSWindow` with `.statusBar`/`.floating` level, `ignoresMouseEvents = true`).
 
 ### Phase 2 verification
@@ -201,24 +218,26 @@ still opens, slider still works. Confirm two frontends driving `control.json` at
 
 ---
 
-## Phase 3 — Stream Deck plugin (thin wrapper)
+## Phase 3: Stream Deck plugin (thin wrapper)
 
-Complete the existing TS scaffold in `plugin/`. It's the thinnest frontend — it just writes `control.json`
+Complete the existing TS scaffold in `plugin/`. It's the thinnest frontend: it just writes `control.json`
 on keypress and paints the level (`42%` / `🔇`) on the key faces, its own bit of the visual layer.
 
-- `plugin/src/plugin.ts` — register the three action instances (`streamDeck.actions.registerAction`),
+- `plugin/src/plugin.ts`: register the three action instances (`streamDeck.actions.registerAction`),
   `ensureHelper(...)`, a ~1 s `setInterval` calling `refreshAll()` on each so faces track the level, then
   `streamDeck.connect()`; add `unhandledRejection`/`uncaughtException` handlers that log and **continue**
   (a crash resets the board).
 - `plugin/package.json` (`type: module`, pnpm, deps `@elgato/streamdeck`, devDeps `esbuild` + `typescript`),
-  `plugin/tsconfig.json` (`target: ES2022`, TypeScript 5 **standard** decorators — do NOT add
-  `experimentalDecorators`/`useDefineForClassFields`, they break `@action` typechecking), `plugin/build.mjs` (esbuild bundle `src/plugin.ts` → `.sdPlugin/bin/plugin.js`,
+  `plugin/tsconfig.json` (`target: ES2022`, TypeScript 5 **standard** decorators; do NOT add
+  `experimentalDecorators`/`useDefineForClassFields`, they break `@action` typechecking),
+  `plugin/build.mjs` (esbuild bundle `src/plugin.ts` → `.sdPlugin/bin/plugin.js`,
   **paths resolved relative to the script's own dir**, then copy `../helper/loudini-helper` into
   `.sdPlugin/bin/` and `chmod 0o755` so the plugin ships its own daemon; if the binary is missing, warn +
   print the swiftc line, don't fail).
 - `plugin/.gitignore` (`node_modules/`, `.sdPlugin/bin/`, `*.log`, `.DS_Store`).
 - Placeholder icons the manifest needs: `.sdPlugin/imgs/actions/{vol-up,vol-down,mute}.png` (**72×72**) and
-  `.sdPlugin/imgs/plugin/marketplace.png` (**288×288**) — real dimensions or the Elgato validator rejects them.
+  `.sdPlugin/imgs/plugin/marketplace.png` (**288×288**). Use real dimensions or the Elgato validator
+  rejects them.
 
 ### Phase 3 verification
 
@@ -227,7 +246,7 @@ executable `loudini-helper`. Report honestly; don't claim success you didn't obs
 
 ---
 
-## Cross-review with Codex (GPT-5.6) — do this on the risky code
+## Cross-review with Codex (GPT-5.6): do this on the risky code
 
 After **Phase 1's Swift changes** and **Phase 2's CGEventTap**, before calling either done, get an
 independent review from the **`codex` MCP tool** (the same one `/cross-review` uses):
@@ -237,28 +256,28 @@ independent review from the **`codex` MCP tool** (the same one `/cross-review` u
   them directly (Codex often won't run `git` under its sandbox), and demand a falsifiable findings list.
   Capture the `threadId`; use `codex-reply` on the same thread to push back on findings.
 - **Have it hunt, specifically:**
-  - `control.json` **write atomicity / TOCTOU** — can a concurrent CLI + Stream Deck + menu-bar write tear
+  - `control.json` **write atomicity / TOCTOU**: can a concurrent CLI + Stream Deck + menu-bar write tear
     the file or lose an update? Is the temp-then-rename correct and same-filesystem?
-  - **Real-time safety** in the audio IOProc — any lock, allocation, or file IO on the render thread
+  - **Real-time safety** in the audio IOProc: any lock, allocation, or file IO on the render thread
     (there must be none) if you touched the daemon's hot path.
-  - **CGEventTap** — correct event type mask, correct consume (return `nil`), re-enable on
+  - **CGEventTap**: correct event type mask, correct consume (return `nil`), re-enable on
     `kCGEventTapDisabledByTimeout`, and no main-thread blocking.
-  - **launchd plist** correctness — keys, `KeepAlive` semantics, label matching the bootout path.
-  - **Fail-open** preserved — no new path where a crash leaves audio muted.
+  - **launchd plist** correctness: keys, `KeepAlive` semantics, label matching the bootout path.
+  - **Fail-open** preserved: no new path where a crash leaves audio muted.
 - Verify each finding yourself against the code, drop the ones you can refute, fix the ones that hold, then
   re-measure. Note in your final report what Codex flagged and what you did about it.
 
 ## Gotchas you MUST carry into code + docs
 
 - **Background Music (biggest conflict):** BGM must be quit/uninstalled. With BGM as the default output the
-  daemon double-captures and feeds back. Loudini *replaces* BGM — say so prominently in the README.
-- **TCC — System Audio Recording:** process taps need this grant for the *responsible* process. Under the
+  daemon double-captures and feeds back. Loudini *replaces* BGM, so say so prominently in the README.
+- **TCC (System Audio Recording):** process taps need this grant for the *responsible* process. Under the
   LaunchAgent it's the daemon's context; under the Stream Deck plugin it's the Stream Deck app; under the
-  menu-bar app it's that app. First run triggers the prompt — document it. A packaged `.app` needs
+  menu-bar app it's that app. First run triggers the prompt, so document it. A packaged `.app` needs
   `NSAudioCaptureUsageDescription` in its `Info.plist`.
-- **Atomic writes** to `control.json` (temp + `rename`) — non-negotiable with multiple frontends.
+- **Atomic writes** to `control.json` (temp + `rename`) are non-negotiable with multiple frontends.
 - **Decorators:** the Stream Deck plugin's `@action` uses TypeScript 5 **standard** (TC39) decorators on
-  `target: ES2022`. Do not add `experimentalDecorators`/`useDefineForClassFields` — they break typechecking.
+  `target: ES2022`. Do not add `experimentalDecorators`/`useDefineForClassFields`; they break typechecking.
 
 ## Constraints
 
@@ -267,7 +286,7 @@ independent review from the **`codex` MCP tool** (the same one `/cross-review` u
 - **Timestamped backup before editing any config/plist in place.**
 - TypeScript strict, **no `any`**. Swift: keep it tight and idiomatic, match the existing daemon's style.
 - **No new dependencies** beyond what's named here without justification.
-- Keep everything **generic and open-source-clean** — no machine names, no account names, no personal refs.
+- Keep everything **generic and open-source-clean**: no machine names, no account names, no personal refs.
 - Small, composable, surgical changes; every changed line traces to this plan.
 
 ## Definition of done (per phase)
@@ -276,11 +295,12 @@ independent review from the **`codex` MCP tool** (the same one `/cross-review` u
    writes never corrupt `control.json`; LaunchAgent survives logout; README has the Karabiner recipe;
    Codex review clean.
 2. **Menu-bar app**: hardware volume keys drive Loudini with no macOS HUD; Accessibility handled
-   gracefully; daemon lifecycle owned; **the visual layer works — menu-bar indicator, slider, and a
+   gracefully; daemon lifecycle owned; **the visual layer works: menu-bar indicator, slider, and a
    status-driven on-screen HUD that reacts to *any* frontend**; Codex review of the tap clean.
-3. **Stream Deck plugin**: `pnpm build` yields `.sdPlugin/bin/{plugin.js,loudini-helper}`; key faces show the level.
+3. **Stream Deck plugin**: `pnpm build` yields `.sdPlugin/bin/{plugin.js,loudini-helper}`; key faces show
+   the level.
 
-All four ship together — the daemon plus three frontends, with the menu-bar app as the shared visual layer.
+All four ship together: the daemon plus three frontends, with the menu-bar app as the shared visual layer.
 
 ## Signing
 
@@ -291,19 +311,26 @@ cert (dev), then falls back to **ad-hoc**.
 ### Stable signing (dev)
 
 macOS ties every TCC grant (Accessibility, Input Monitoring, Audio) to the app's code identity. Ad-hoc
-signing mints a new identity on every build, so grants reset each rebuild — you re-approve permissions
+signing mints a new identity on every build, so grants reset each rebuild and you re-approve permissions
 constantly. A stable self-signed cert fixes it: the identity (a fixed certificate leaf) stays constant,
 so grants persist. Create it once:
 
 ```sh
+brew install openssl@3     # once: macOS ships LibreSSL, which has no `-legacy` flag
 scripts/make-dev-cert.sh
 ```
+
+The script needs OpenSSL 3 first on `PATH`. `openssl pkcs12 -export -legacy` is the only way to mint
+a PKCS#12 that macOS's Security framework can import, and `-legacy` does not exist in LibreSSL, so on
+a Mac without Homebrew's `openssl@3` the script aborts after minting the key and no `Loudini Dev`
+identity is created. `build-app.sh` then silently falls back to ad-hoc signing and the grants keep
+dying on every rebuild. The script checks this itself and exits with that instruction.
 
 Safe to re-run: it exits early if the cert already exists, because a second leaf would change the
 designated requirement and break the grants it exists to preserve. It prints the `tccutil` lines to
 run afterwards.
 
-The cert lists as `CSSMERR_TP_NOT_TRUSTED` (self-signed) — that's fine, `codesign` still signs with it and
+The cert lists as `CSSMERR_TP_NOT_TRUSTED` (self-signed). That's fine: `codesign` still signs with it and
 the designated requirement stays stable (`identifier "gg.pim.loudini.menubar" and certificate leaf = H"…"`).
 After a build's identity changes (e.g. first switch from ad-hoc), reset any stale grants once:
 `tccutil reset Accessibility gg.pim.loudini.menubar` (and `ListenEvent`, `AudioCapture`), then re-approve.
@@ -325,7 +352,7 @@ menubar/build-app.sh
 xcrun notarytool store-credentials loudini --apple-id "you@example.com" \
   --team-id "TEAMID" --password "app-specific-pw"
 
-# 3. Zip and submit, authenticating with the stored profile — no secret on the command line.
+# 3. Zip and submit, authenticating with the stored profile (no secret on the command line).
 ditto -c -k --keepParent menubar/Loudini.app /tmp/Loudini.zip
 xcrun notarytool submit /tmp/Loudini.zip --keychain-profile loudini --wait
 
@@ -334,7 +361,7 @@ xcrun stapler staple menubar/Loudini.app
 ```
 
 Notes:
-- The private `IOAVService*` symbols (DDC brightness) are fine for notarization — that's not App Store
+- The private `IOAVService*` symbols (DDC brightness) are fine for notarization; that's not App Store
   review. The Mac App Store is out anyway (private API + Input Monitoring + a bundled daemon); ship via
   direct download or a Homebrew cask.
 - `loudini.entitlements` currently declares only `com.apple.security.device.audio-input` (for the audio
@@ -345,15 +372,17 @@ Notes:
 
 Three GitHub Actions workflows (`.github/workflows/`):
 
-- **`preflight.yml`** — on every push to `main` and every PR, runs `scripts/preflight.sh`: version
+- **`preflight.yml`** runs `scripts/preflight.sh` on every push to `main` and every PR: version
   agreement across the five version homes plus the release-notes check. Deliberately has **no**
-  `paths-ignore`, unlike `ci.yml` — two of the homes it guards (`docs/index.html`, `CHANGELOG.md`) are
-  exactly the paths `ci.yml` skips, so a docs-only or CHANGELOG-only PR is gated by this workflow alone.
-- **`ci.yml`** — on every push to `main` and every PR, compiles `Loudini.app` (ad-hoc signed) on a
-  macOS runner and typechecks + builds the Stream Deck plugin on Linux. Purely a "did this break the
-  build" signal. No secrets; fork PRs build safely because GitHub never exposes secrets to them.
+  `paths-ignore`, unlike `ci.yml`. Two of the homes it guards (`docs/index.html`, `CHANGELOG.md`) are
+  exactly the paths `ci.yml` skips, so this workflow alone gates a docs-only or CHANGELOG-only PR.
+- **`ci.yml`**: on every push to `main` and every PR that touches something outside `docs/` and
+  `**/*.md`, three jobs run. `app` compiles `Loudini.app` (ad-hoc signed) on a macOS runner, `test`
+  runs `scripts/test.sh` (the contract regression suite) on the same runner, and `plugin` typechecks +
+  builds the Stream Deck plugin on Linux. No secrets; fork PRs build safely because GitHub never
+  exposes secrets to them.
   (Developer-ID signing + notarization happen locally in `scripts/release.sh`, not here.)
-- **`release.yml`** — **dormant manual cloud fallback** (`workflow_dispatch` only). Releases are cut
+- **`release.yml`** is a **dormant manual cloud fallback** (`workflow_dispatch` only). Releases are cut
   **locally** with `scripts/release.sh` (below); this workflow only runs when you trigger it from
   Actions → release → Run workflow (e.g. to build the current version in the cloud). When triggered, a
   cheap Linux `check` job reads `CFBundleShortVersionString`; if that version has no published release
@@ -363,8 +392,8 @@ Three GitHub Actions workflows (`.github/workflows/`):
   `Loudini.dmg` as a GitHub Release tagged `vX.Y.Z`. The site's download button points at
   `releases/latest/download/Loudini.dmg`, so it always resolves to the newest release.
 
-**One-time setup — five repository secrets** (Settings → Secrets and variables → Actions → New
-repository secret). These are used **only** by the manual `release.yml` cloud fallback — the local
+**One-time setup: five repository secrets** (Settings → Secrets and variables → Actions → New
+repository secret). **Only** the manual `release.yml` cloud fallback uses these. The local
 `scripts/release.sh` doesn't touch them (it signs with your keychain cert and notarizes via your
 `loudini` notarytool profile), so you can skip this entirely if you only ever release locally:
 
@@ -383,47 +412,53 @@ base64 -i DeveloperID.p12 | pbcopy      # paste as DEVELOPER_ID_CERT_P12
 | `APPLE_TEAM_ID` | 10-char Developer Team ID (e.g. `24BDPF6PWJ`) |
 | `APPLE_APP_PASSWORD` | an app-specific password from appleid.apple.com |
 
+Cutting a release locally needs three things installed first: a **Developer ID Application** cert, the
+`loudini` notarytool keychain profile (both above), and the **GitHub CLI** (`gh`, authenticated with
+push access: `brew install gh && gh auth login`). `release.sh` publishes the Release through `gh` and
+aborts on its first call without one.
+
 Cut a release (locally, from your Mac): run `scripts/bump-version.sh 0.3.0`. The version lives in five
 files that must agree (`menubar/Info.plist`, the plugin's `package.json` + Stream Deck manifest, the
 `docs/index.html` footer, and a `CHANGELOG.md` heading); the script backs up all five to a temp dir
 (printed before it rewrites anything, so a half-done bump is still recoverable), writes them, and adds a
-dated CHANGELOG skeleton. Fill that skeleton in — preflight rejects the `TODO` placeholder, so a release
-can't publish it. Then commit, `git push origin main`, and run `scripts/release.sh`.
-It builds, notarizes, staples, and publishes the GitHub Release; re-running is safe (it bails if the
-version is already published). If you ever want a cloud build instead, trigger `release.yml` manually
+dated CHANGELOG skeleton. Fill that skeleton in. Preflight rejects the `TODO` placeholder, so a release
+can't publish it. Then commit, `git push origin main`, and run `scripts/release.sh`. It builds,
+notarizes, staples, and publishes the GitHub Release; re-running is safe (it bails if the version is
+already published). If you ever want a cloud build instead, trigger `release.yml` manually
 (Actions → release → Run workflow).
 
 `scripts/preflight.sh` is the cheap gate behind that. Before `release.sh` builds anything it asserts the
 five versions agree, that this version's CHANGELOG section is actually written (an empty section or the
-bump-version `TODO` placeholder fails — that text would be published verbatim as the release notes), and
+bump-version `TODO` placeholder fails, because that text would otherwise be published verbatim as the
+release notes), and
 that no release-version literal (`v0.3.0`, `Loudini-0.3.0`) is baked into `package-dmg.sh`. Drift costs
 seconds instead of an hour in Apple's notary queue. It also runs on every push/PR via
 `.github/workflows/preflight.yml`. Run it standalone any time.
 
 Tip: `SKIP_NOTARIZE=1 scripts/package-dmg.sh` builds and Developer-ID-signs the DMG while skipping the
-Apple notary wait — handy for checking packaging/signing locally without waiting on Apple.
+Apple notary wait, which is handy for checking packaging/signing locally without waiting on Apple.
 
 Re-running after an aborted notary wait is cheap, within limits. `package-dmg.sh` reuses
-`menubar/Loudini.app` only when all three hold — it is this version, it is stapled, and no `.swift` file
-in `menubar/` or `helper/` is newer than the built binary — so a source fix made since the aborted run
+`menubar/Loudini.app` only when all three hold: it is this version, it is stapled, and no `.swift` file
+in `menubar/` or `helper/` is newer than the built binary. So a source fix made since the aborted run
 still forces a rebuild instead of quietly shipping the old binary (the log names the file that triggered
 it). Notary resume is **DMG-only**: `dist/.notary-state` maps a DMG's sha256 to its Apple submission id,
 so an interrupted wait resumes that submission instead of re-uploading, and a rejected verdict drops the
 row again so the fixed re-run uploads fresh bytes rather than replaying the rejection. The app zip can
-never resume — it is deleted on every exit, and an unstapled app is rebuilt into different bytes — so it
-is never recorded. Use `FORCE_REBUILD=1 scripts/package-dmg.sh` to rebuild from scratch anyway.
+never resume, because it is deleted on every exit and an unstapled app is rebuilt into different bytes,
+so it is never recorded. Use `FORCE_REBUILD=1 scripts/package-dmg.sh` to rebuild from scratch anyway.
 
-Check Apple's verdict with `scripts/notary-status.sh` — no args lists recent submissions and their
+Check Apple's verdict with `scripts/notary-status.sh`. No args lists recent submissions and their
 statuses, `--watch` re-polls every 60s, `<submission-id>` shows one, and `<submission-id> log` prints
 Apple's reasons when a submission comes back `Invalid`. Notarization is an automated scan (no human
-review): `In Progress` → `Accepted` normally takes 2–15 min, so hours stuck means Apple is stalling.
+review): `In Progress` → `Accepted` normally takes 2 to 15 min, so hours stuck means Apple is stalling.
 Note the timestamps it prints are **UTC**.
 
 Notes:
 - The signing cert lives in your GitHub secrets, so anyone with push access to `main` (or who can edit
   a workflow) can use your Developer ID identity. Keep collaborators trusted, or protect `main` and
   require review on workflow changes. The identity is revocable at developer.apple.com if ever leaked.
-- The runner is Apple Silicon, so the DMG is `arm64`-only — same as a local `build-app.sh` build.
+- The runner is Apple Silicon, so the DMG is `arm64`-only, same as a local `build-app.sh` build.
   Intel support would need a universal (`lipo`'d) build; not wired up.
 - Hardening option: pin the `actions/*` and `pnpm/action-setup` steps to full commit SHAs instead of
   `@v4` tags.

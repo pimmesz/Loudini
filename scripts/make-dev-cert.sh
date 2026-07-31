@@ -20,6 +20,23 @@ if security find-identity -p codesigning 2>/dev/null | grep -q "Loudini Dev"; th
   exit 0
 fi
 
+# `pkcs12 -export -legacy` below is OpenSSL 3 only, and macOS ships LibreSSL as /usr/bin/openssl.
+# Without this check the script dies mid-run with a cryptic "unknown option", after minting the key
+# but before creating the identity, and build-app.sh silently falls back to ad-hoc signing.
+# `|| true` matters: without brew installed the substitution fails, and under `set -e` an
+# assignment takes its exit status, so the script would die here with no message at all.
+brew_prefix="$(brew --prefix openssl@3 2>/dev/null || true)"
+openssl_bin="openssl"
+if [[ -n "${brew_prefix}" && -x "${brew_prefix}/bin/openssl" ]]; then
+  openssl_bin="${brew_prefix}/bin/openssl"
+fi
+openssl_version="$("${openssl_bin}" version 2>/dev/null || true)"
+if [[ "${openssl_version}" != OpenSSL\ 3* ]]; then
+  echo "error: this needs OpenSSL 3, found \"${openssl_version:-none}\"." >&2
+  echo "  fix: brew install openssl@3   (macOS's own LibreSSL has no -legacy flag)" >&2
+  exit 1
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 
@@ -37,11 +54,11 @@ extendedKeyUsage = critical, codeSigning
 EOF
 
 echo "minting a self-signed code-signing cert…"
-openssl req -x509 -newkey rsa:2048 -days 3650 -nodes \
+"${openssl_bin}" req -x509 -newkey rsa:2048 -days 3650 -nodes \
   -keyout "${work}/key.pem" -out "${work}/cert.pem" -config "${work}/cert.conf"
 
 # -legacy + SHA1 MAC: macOS's Security framework can't import OpenSSL 3's default PKCS#12 MAC.
-openssl pkcs12 -export -legacy -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
+"${openssl_bin}" pkcs12 -export -legacy -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES \
   -out "${work}/ident.p12" -inkey "${work}/key.pem" -in "${work}/cert.pem" -passout pass:loudini
 
 security import "${work}/ident.p12" -k "${keychain}" -P loudini -T /usr/bin/codesign
