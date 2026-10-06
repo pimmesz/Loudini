@@ -31,14 +31,14 @@ enum Conflicts {
     /// What goes wrong, phrased for someone who just saw the app's name.
     static func problem(for name: String) -> String {
         isCaptureRival(name)
-            ? "\(name) is running — it double-captures with Loudini and feeds back"
-            : "\(name) is running and may intercept the volume keys"
+            ? "\(name) is open. It makes the sound play twice."
+            : "\(name) is open. It can take over the volume keys."
     }
 
     /// The concrete fix for that problem.
     static func fixHint(for name: String) -> String {
         isCaptureRival(name)
-            ? "quit/uninstall \(name); Loudini replaces it"
-            : "disable volume-key handling in \(name), or launch the Loudini app after it"
+            ? "Quit \(name). Loudini does the same job, so you can uninstall it."
+            : "Turn off the volume keys in \(name), or open Loudini after it."
     }
 }

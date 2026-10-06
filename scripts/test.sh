@@ -27,14 +27,17 @@ binary="${work}/control-file-tests"
 
 echo "compiling contract tests…"
 swiftc -parse-as-library -o "${binary}" \
-  helper/ControlFile.swift helper/ControlFileTests.swift \
+  helper/ControlFile.swift helper/AppTarget.swift helper/StallMath.swift helper/DeviceLevels.swift \
+  helper/ControlFileTests.swift \
   -framework Foundation
 
 # Prove the safety net before relying on it: with no sandbox the binary must refuse (exit 2).
 # Checking the exact code matters — a plain "did it fail?" would also be satisfied by a normal
-# test failure (exit 1) and would quietly stop verifying anything.
+# test failure (exit 1) and would quietly stop verifying anything. --guard-only stops right
+# after the guard, so a broken guard exits 0 without having run a single test against the
+# real ~/.config/loudini.
 set +e
-env -u CFFIXED_USER_HOME "${binary}" >/dev/null 2>&1
+env -u CFFIXED_USER_HOME "${binary}" --guard-only >/dev/null 2>&1
 guard_status=$?
 set -e
 if [[ "${guard_status}" -ne 2 ]]; then

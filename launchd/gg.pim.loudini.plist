@@ -13,19 +13,18 @@
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
-	<!-- Unconditional restart. When the menu-bar app's bundled daemon already holds
-	     daemon.lock, this agent's daemon loses the flock, exit(0)s, and is relaunched
-	     ~every 10s (log spam) until it wins the lock. Do NOT "fix" that with
-	     KeepAlive={SuccessfulExit=false}: the same relaunch is what lets the agent
-	     TAKE OVER once the app quits and frees the lock (the app terminates its
-	     daemon on quit), so gating on failure leaves NO daemon running afterward.
-	     Removing both the spam and the dormancy needs the loser to block on the lock
-	     instead of exit — a daemon change, deferred. -->
+	<!-- Unconditional restart, for a daemon that crashes. When the menu-bar app's
+	     daemon already holds daemon.lock, this agent's daemon waits on the lock
+	     (no tty, so it does not exit) and takes over once the app quits and frees
+	     it. Do NOT switch to KeepAlive={SuccessfulExit=false}: see DECISIONS.md. -->
 	<key>KeepAlive</key>
 	<true/>
 	<!-- Interactive keeps App Nap / background QoS from throttling the audio path. -->
 	<key>ProcessType</key>
 	<string>Interactive</string>
+	<!-- 077: daemon.log and the config files it creates stay readable by this user only. -->
+	<key>Umask</key>
+	<integer>63</integer>
 	<key>StandardOutPath</key>
 	<string>__HOME__/.config/loudini/daemon.log</string>
 	<key>StandardErrorPath</key>

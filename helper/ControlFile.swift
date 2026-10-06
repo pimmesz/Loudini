@@ -9,7 +9,8 @@
 //                own `apps` must merge it forward, never replace the document, or it wipes every
 //                per-app override. Wrap the read-modify-write in withControlLock (below): the
 //                rename stops a torn file but not a lost update.
-// status.json:   {"gain","muted","running","pipeline","device","pid","reason"?,"apps"}, see
+// status.json:   {"gain","muted","running","pipeline","device","pid","reason"?,"apps",
+//                "version"?,"exe"?}, see
 //                `struct Status` below, which is the contract. The daemon writes it (atomically)
 //                on every change; frontends READ it to display the live level. `pid` is not a
 //                Status field: readStatus() uses it to force running:false when that process is
@@ -69,6 +70,17 @@ struct Status: Equatable {
     /// in the anti-flicker grace window). Empty when nothing is playing or the
     /// daemon is gone.
     var apps: [AppEntry]
+    /// Additive: the daemon's build ("0.4.1 (abc1234)") and binary path, "" from an
+    /// older daemon. Lets doctor spot a stale daemon that won the lock.
+    var version: String = ""
+    var exe: String = ""
+}
+
+/// The config directory holds per-app listening history (status.json, daemon.log),
+/// so it is private to this user. Existing installs are tightened by the daemon at start.
+func ensureConfigDir() throws {
+    try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: 0o700])
 }
 
 /// Lenient parse: malformed file or missing keys keep the previous values.
@@ -121,7 +133,9 @@ func readStatus() -> Status? {
                   pipeline: pipeline,
                   device: obj["device"] as? String ?? "",
                   reason: obj["reason"] as? String ?? "",
-                  apps: apps)
+                  apps: apps,
+                  version: obj["version"] as? String ?? "",
+                  exe: obj["exe"] as? String ?? "")
 }
 
 /// Lenient parse of the status.json `apps` array; unknown/missing keys default.
@@ -155,10 +169,13 @@ func appEntryJSON(_ a: AppEntry) -> [String: Any] {
 /// new complete file, never a partial one; concurrent writers interleave but never tear it.
 func atomicWrite(_ data: Data, to url: URL) throws {
     let dir = url.deletingLastPathComponent()
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: 0o700])
     let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).\(getpid()).\(UUID().uuidString).tmp")
     do {
         try data.write(to: tmp)
+        // Owner-only before the rename, so the published file is never world-readable.
+        guard chmod(tmp.path, 0o600) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     } catch {
         try? FileManager.default.removeItem(at: tmp)  // partial write (e.g. disk full)
         throw error
@@ -171,14 +188,16 @@ func atomicWrite(_ data: Data, to url: URL) throws {
 }
 
 func writeControl(_ c: Control) throws {
-    var obj: [String: Any] = ["gain": clampGain(c.gain), "muted": c.muted]
     // Preserve per-app overrides across master-only writes (the CLI/menu-bar
     // read-modify-write the whole Control, so dropping `apps` here would wipe a
-    // user's per-app settings on any master volume change). Omitted when empty
-    // to keep the file byte-identical to the pre-Phase-2 shape for master users.
-    if !c.apps.isEmpty {
-        obj["apps"] = c.apps.mapValues { ["gain": clampGain($0.gain), "muted": $0.muted] }
-    }
+    // user's per-app settings on any master volume change). Always written, even
+    // empty: readers treat an absent key as "keep previous", so omitting it would
+    // make "reset all apps" a no-op for a running daemon.
+    // An override of 100% unmuted changes nothing but still costs the daemon a
+    // per-app tap, so it is dropped.
+    let apps = c.apps.filter { clampGain($0.value.gain) != 100 || $0.value.muted }
+    let obj: [String: Any] = ["gain": clampGain(c.gain), "muted": c.muted,
+                              "apps": apps.mapValues { ["gain": clampGain($0.gain), "muted": $0.muted] }]
     let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     try atomicWrite(data, to: controlURL)
 }
@@ -189,13 +208,18 @@ func writeControl(_ c: Control) throws {
 /// a torn file but not a lost update — a per-app override set between another
 /// writer's read and its rename would be silently dropped without this. Mirrors
 /// DDC.withLock (brightness.lock). Fail-open: proceed unlocked if the lock can't
-/// be taken.
+/// be opened, or is still held after about half a second.
 func withControlLock<T>(_ body: () throws -> T) rethrows -> T {
-    try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-    let fd = open(configDir.appendingPathComponent("control.lock").path, O_CREAT | O_RDWR, 0o644)
+    try? ensureConfigDir()
+    let fd = open(configDir.appendingPathComponent("control.lock").path, O_CREAT | O_RDWR, 0o600)
     guard fd >= 0 else { return try body() }
     defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
-    flock(fd, LOCK_EX)
+    // Bounded wait: holders are short read-modify-writes, but one stopped mid-write
+    // (SIGSTOP, a debugger) must not freeze the daemon's engine queue forever.
+    for _ in 0..<100 {
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { break }
+        usleep(5_000)
+    }
     return try body()
 }
 

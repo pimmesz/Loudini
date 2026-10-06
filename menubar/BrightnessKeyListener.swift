@@ -10,7 +10,8 @@
 // keyboard usages (0x07/0x3A, 0x3B) and macOS remaps them host-side. Other
 // keyboards emit real Consumer brightness usages. We handle both. Listening
 // (not consuming) is fine: on these setups nothing else reacts to the keys.
-// Needs the Input Monitoring permission; macOS prompts on first start().
+// Needs the Input Monitoring permission. Only the menu's Enable Brightness Keys row asks
+// for it (requestAccess), so a Mac without an external monitor never sees that dialog.
 
 import Foundation
 import IOKit.hid
@@ -39,11 +40,10 @@ final class BrightnessKeyListener {
 
     var isRunning: Bool { manager != nil }
 
-    /// Safe to call repeatedly: it's a no-op once open, and retries while the
-    /// Input Monitoring permission is still missing.
+    /// Safe to call repeatedly: it's a no-op once open, and silently waits while the
+    /// Input Monitoring permission is still missing (the open would fail anyway).
     func start() {
-        guard manager == nil else { return }
-        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)  // Input Monitoring prompt
+        guard manager == nil, Self.accessGranted else { return }
         let m = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         // Keyboards only. Matching every device tries to open the mic, Stream
         // Deck, etc. — some are held exclusively by other apps, which fails the

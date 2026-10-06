@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Cut a Loudini release from YOUR Mac — THE release path. Build + notarize + staple +
 # publish the current menubar/Info.plist version as a GitHub Release. Releases are
-# local-only: the release.yml workflow is a dormant manual (workflow_dispatch) fallback,
-# not auto-triggered. Re-running is safe — it bails if the version is already published
-# and refuses a foreign/stale draft. Babysit or Ctrl-C the Apple notary wait.
+# local-only: there is no cloud release workflow. Re-running is safe: it bails if the
+# version is already published and refuses a foreign/stale draft. Babysit or Ctrl-C the Apple notary wait.
 #
 # One-time prereqs (see BUILD.md -> Release signing & notarization):
 #   - a "Developer ID Application" cert in your login keychain
@@ -37,6 +36,8 @@ git fetch -q origin main
 # Cheap deterministic checks (version agreement across the five files that carry it)
 # BEFORE the expensive build + notary wait, so drift costs seconds instead of an hour.
 "${script_dir}/preflight.sh"
+# The contract tests too: CI runs them on push, but nothing makes this script wait for CI.
+"${script_dir}/test.sh"
 
 # Plist read + N.N.N validation live in version.sh. Explicit `|| exit 1`: a failing command
 # substitution in an assignment does not trip set -e.

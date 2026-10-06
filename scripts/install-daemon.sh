@@ -15,7 +15,9 @@ if [[ ! -x "${helper}" ]]; then
   exit 1
 fi
 
-mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/.config/loudini"
+mkdir -p "${HOME}/Library/LaunchAgents"
+mkdir -p "${HOME}/.config/loudini"
+chmod 700 "${HOME}/.config/loudini"   # holds listening history; also tightens an existing dir
 
 # Keep a copy of whatever was there before we overwrite it.
 if [[ -f "${dest}" ]]; then

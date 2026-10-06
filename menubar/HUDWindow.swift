@@ -21,6 +21,7 @@ final class HUDWindow {
     private let label = NSTextField(labelWithString: "")
     private let bar = NSProgressIndicator()
     private var hideWork: DispatchWorkItem?
+    private var announceWork: DispatchWorkItem?
 
     init() {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 240, height: 64),
@@ -73,6 +74,7 @@ final class HUDWindow {
     }
 
     private func show(symbol: String, text: String, value: Int, dimmedBar: Bool) {
+        announce(text)
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
         label.stringValue = text
         bar.doubleValue = Double(value)
@@ -93,6 +95,19 @@ final class HUDWindow {
         let work = DispatchWorkItem { [weak self] in self?.fadeOut() }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// VoiceOver gets no macOS feedback while Loudini owns the keys, so speak the level.
+    /// Debounced: a held key announces only where it stops, not every step.
+    private func announce(_ text: String) {
+        announceWork?.cancel()
+        let work = DispatchWorkItem {
+            NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: text,
+                                            .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
+        announceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func fadeOut() {

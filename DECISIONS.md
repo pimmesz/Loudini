@@ -29,6 +29,10 @@ does not poll. Low-frequency and pre-existing.
 
 ## 2026-07-22 — Stream Deck plugin stays OUT of `control.lock`
 
+**Superseded 2026-10-06** (see "Stream Deck plugin writes through the bundled CLI" below).
+The premise was wrong: the plugin's merge rewrites the whole file, so it can revert a
+per-app write that lands between its read and its rename.
+
 **Decision.** The Node plugin (`plugin/src/control.ts`) does NOT take the
 cross-process `control.lock` that the Swift daemon/CLI/menu-bar app now hold around
 their `control.json` read-modify-write. It keeps its atomic temp-file + rename write.
@@ -60,7 +64,114 @@ worse failure: the app terminates its bundled daemon on quit
 and audio control is offline until next login. The restart loop, ugly as it is, is
 also the mechanism that lets the agent take over once the app frees the lock.
 
-**Proper fix (deferred).** Make the single-instance loser BLOCK on `daemon.lock`
-(`flock(LOCK_EX)`) instead of `exit(0)`, so it waits and takes over when the winner
-exits — no spam, no dormancy. That's a daemon-behaviour change needing launchd
-runtime testing, so it's out of scope for the audit-fix pass.
+**Proper fix (done 2026-10-06).** A losing daemon with no terminal attached (launchd,
+the app, the Stream Deck plugin) now blocks on `daemon.lock` (`flock(LOCK_EX)`) before
+touching any audio and takes over when the winner exits, so there is no restart loop
+and no dormancy; `KeepAlive=true` stays for crashes. A daemon started from a terminal
+still exits at once with the "already running" message.
+
+## 2026-10-06: Verdicts on the 2026-10-05 audit needs-decision items
+
+Recorded with audit-decide so the next audit run finds them instead of re-raising them.
+Finding ids are the audits' own (ledger `~/.claude/audit-ledger/Loudini/*-2026-10-05*.md`).
+
+### Stream Deck plugin writes through the bundled CLI (do now)
+
+`plugin/src/control.ts:50` (check-then-act-1, file-write-races-1). Key presses call
+`loudini-helper up/down/mute`, which take `control.lock`; the plugin's own `writeControl`,
+`nudge` and `toggleMute` go. Costs one process spawn per press.
+
+### Plugin contract tests run on Node 24 in CI (do now)
+
+`plugin/src/control.ts` (TSA-12, refactor type-safety-1, error-handling-1..4). A
+`node --test` harness under a temp HOME, run on Node 24 in CI. The shipped plugin runtime
+stays on Node 20 until the SDK upgrade below.
+
+### Stream Deck SDK, TypeScript and Node runtime upgrades (deferred)
+
+`plugin/package.json:16`, `:21`, `manifest.json:11` (unmaintained-1, upgrade-debt-1..3).
+Semver-major, and nothing here can smoke-test a real Stream Deck.
+**Trigger:** the next plugin change that gets a hands-on deck test, or a Marketplace
+submission. Order: @elgato/streamdeck 1.x to 3.x, then TypeScript, with Node 24 alongside.
+
+### Update check stays on by default, disclosed (do now)
+
+`menubar/LoudiniApp.swift:71` (lawful-basis-and-eprivacy-1, third-party-sharing-1).
+Keep default-on; disclose it in README and on the landing page, and say plainly that the
+request carries your IP address to GitHub and nothing else.
+
+### Cloud release workflow removed (do now)
+
+`.github/workflows/release.yml` (ci-pipelines-1..3, secrets-config-1, docs claims-features-7).
+Releases are local-only via `scripts/release.sh`; the dormant workflow and the BUILD.md
+secrets section go, so no signing secret can ever be readable by a branch workflow.
+
+### GitHub Actions stay on major tags (accepted)
+
+`.github/workflows/ci.yml:53` (ci-pipelines-4, lockfile-integrity-3). First-party
+actions/* and pnpm/action-setup, and CI holds no secrets. SHA pinning plus Dependabot is
+upkeep without a matching risk. **Revisit if** a third-party action or a secret enters CI.
+
+### Daemon-health gaps, decided after the render-stall investigation
+
+`helper/loudini-helper.swift:366`, `:921`, `:1011` (signal-less-failure-paths-1,
+health-and-readiness-checks-1, -2), first deferred, then decided the same day with the
+daemon.log and `pmset -g log` evidence:
+
+- **Render stalls are a sleep artefact (do now).** Since 2026-09-29, 40 of 41 stalls
+  fired during DarkWake: the built-in speakers do not run, Chrome still reports output,
+  and the uptime clock advances, so the watchdog tore the pipeline down and rebuilt it all
+  night. One rebuild after a real wake never started (2026-10-06 10:43 local). Every one of
+  the 314 "never produced an IO callback" stalls had the Chrome per-app tap. Fix: the
+  watchdog notices a sleep gap (wall clock ahead of uptime) and pauses stall checks for
+  90 s of uptime after it.
+- **Silent render with a moving heartbeat (do now, diagnostics only).** The IOProc counts
+  callbacks that lacked a tap buffer, and the log reports it when no complete callback
+  arrives within 60 s. Decide on a behaviour change once that counter shows non-zero.
+- **Hung HAL call and unbounded SIGTERM wait (accepted).** 79 days of daemon.log show no
+  hang. **Revisit if** a running daemon stops logging or updating status.json, or quit
+  hangs.
+
+### Extract the CLI resolver and the stall math for tests (do now)
+
+`helper/loudini-helper.swift:1470` and `:1058` (TSA-13, TSA-14). Move `resolveAppTarget`,
+the CLI argument guards, the stall verdict and the stall-rebuild delay into Foundation-only
+files and table-test them in `scripts/test.sh`.
+
+### Identity per-app overrides are pruned on write (do now)
+
+`helper/ControlFile.swift` writeControl (perf NEW-2). An override of 100% unmuted is the
+same as none, so it is not written. That drops the extra per-app tap an identity entry
+keeps alive.
+
+### AppRoster full rescan per notification (accepted)
+
+`helper/loudini-helper.swift:665` (perf NPLUS1-04). Off the engine queue and never
+measured. **Revisit if** a counter or profile shows roster refreshes matter.
+
+### Per-app rows are not sticky (accepted)
+
+`SPEC-per-app-volume.md:65` (claims-features-5). Rows drop 5 s after an app goes quiet,
+overrides or not; the spec bullet is marked not implemented. Overrides still persist in
+control.json and Reset App Volumes shows whenever any exist.
+
+### Brightness docs narrowed to the recorded residual (do now)
+
+`README.md:199` (claims-features-2). The 2026-07-22 brightness decision stands; README and
+BUILD.md say the CLI steps from brightness.json and the app steps from its own level.
+
+### Logging hygiene items (do now)
+
+`helper/loudini-helper.swift:891` (signal-less-failure-paths-4), `menubar/LoudiniApp.swift:1117`
+(health-and-readiness-checks-3), `plugin/src/plugin.ts:41` (error-tracker-5,
+error-handling-3), `plugin/src/actions.ts:13` (error-handling-4).
+
+### Landing page advisories (do now)
+
+`docs/index.html:193`, `:258`, `:345` (contrast-visual-2, semantic-structure-2, -3).
+
+### Different-build daemon shown as a tooltip (do now)
+
+The menu-bar Output row gets a warning tooltip when the running daemon's build differs from
+the app's; `loudini doctor` already warns. No new menu row.
+

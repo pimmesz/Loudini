@@ -13,3 +13,12 @@ node_modules/
 
 # Claude Code writes a machine-local lock here; the tracked skill stays tracked.
 .claude/scheduled_tasks.lock
+
+# signing material, never commit
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+.env
+.env.*

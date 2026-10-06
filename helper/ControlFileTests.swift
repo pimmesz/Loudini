@@ -133,12 +133,12 @@ private func testWriteControlPreservesApps() {
 
 private func testWriteControlShape() {
     removeFixtures()
-    // With no overrides the `apps` key is omitted entirely, so a master-only user's file
-    // stays byte-identical to the pre-per-app shape and older readers keep working.
+    // With no overrides `apps` is still written as {}: readers treat an absent key as
+    // "keep previous", so omitting it would make a reset invisible to a running daemon.
     try! writeControl(Control(gain: 55, muted: true))
-    checkEqual("master-only file keeps the legacy shape",
+    checkEqual("master-only file writes an empty apps map",
                try? String(contentsOf: controlURL, encoding: .utf8),
-               #"{"gain":55,"muted":true}"#)
+               #"{"apps":{},"gain":55,"muted":true}"#)
 
     // sortedKeys is what makes the file byte-stable for a given Control, which is what
     // lets callers compare two serialisations to detect "nothing actually changed".
@@ -235,6 +235,15 @@ private func testNudge() {
 private func testPerAppMutators() {
     removeFixtures()
 
+    // Changing one field of an existing override keeps the other: dragging a muted
+    // app's slider must not unmute it, and muting must not reset its level.
+    try! writeControl(Control(gain: 50, muted: false, apps: ["com.x": AppOverride(gain: 20, muted: true)]))
+    checkEqual("setApp keeps an existing mute", try! ControlOps.setApp("com.x", gain: 40).apps["com.x"],
+               AppOverride(gain: 40, muted: true))
+    try! writeControl(Control(gain: 50, muted: false, apps: ["com.x": AppOverride(gain: 30, muted: false)]))
+    checkEqual("toggleAppMute keeps an existing gain", try! ControlOps.toggleAppMute("com.x").apps["com.x"],
+               AppOverride(gain: 30, muted: true))
+
     // setApp seeds a default (100/false) for a new app, then clamps the gain.
     try! writeControl(Control(gain: 50, muted: false))
     let a1 = try! ControlOps.setApp("com.x", gain: 250)
@@ -253,6 +262,9 @@ private func testPerAppMutators() {
     checkEqual("toggleAppMute seeds default + flips", try! ControlOps.toggleAppMute("com.y").apps["com.y"],
                AppOverride(gain: 100, muted: true))
     check("toggleAppMute flips back", try! ControlOps.toggleAppMute("com.y").apps["com.y"]?.muted == false)
+    // Flipped back to 100% unmuted is the same as no override, so it is not written.
+    check("unmuted at 100% leaves no override on disk", ControlOps.current().apps["com.y"] == nil)
+    try! writeControl(Control(gain: 60, muted: false, apps: ["com.y": AppOverride(gain: 50, muted: false)]))
     check("toggleAppMute empty id is a no-op", try! ControlOps.toggleAppMute("").apps.count == 1)
 
     // toggleAppMute touches only its target.
@@ -267,6 +279,11 @@ private func testPerAppMutators() {
     try! writeControl(Control(gain: 40, muted: true, apps: ["a": AppOverride(gain: 20, muted: false)]))
     let r = try! ControlOps.resetApps()
     check("resetApps clears the apps map", r.apps.isEmpty)
+    // What a running daemon sees: it reads with its last-good map as `previous`, so the
+    // file itself must say "no overrides", not just leave the key out.
+    let daemonView = readControl(previous: Control(gain: 40, muted: true,
+                                                   apps: ["a": AppOverride(gain: 20, muted: false)]))
+    checkEqual("resetApps clears the apps map for a running daemon", daemonView?.apps, [String: AppOverride]())
     checkEqual("resetApps keeps master gain", r.gain, 40)
     check("resetApps keeps master mute", r.muted == true)
 
@@ -291,9 +308,34 @@ private func testReadStatusDeadDaemon() {
     """#, to: statusURL)
     let s = readStatus()
     check("dead daemon forces running false", s?.running == false)
+    checkEqual("dead daemon still reports device", s?.device, "Scarlett")
     check("dead daemon forces pipeline false", s?.pipeline == false)
     checkEqual("dead daemon drops the stale roster", s?.apps.count, 0)
     checkEqual("dead daemon still reports gain", s?.gain, 80)
+}
+
+/// The test process's own pid is guaranteed alive, so this is the healthy-daemon case.
+private func testReadStatusLiveDaemon() {
+    let me = getpid()
+    writeRaw(#"""
+    {"gain":70,"muted":true,"running":true,"pipeline":true,"device":"Scarlett","pid":\#(me),
+     "version":"0.4.1 (abc1234)","exe":"/x/loudini-helper",
+     "apps":[{"bundleID":"a","name":"A","pid":1,"gain":50,"muted":false,"active":true}]}
+    """#, to: statusURL)
+    let s = readStatus()
+    check("live daemon stays running", s?.running == true)
+    check("live daemon keeps pipeline", s?.pipeline == true)
+    checkEqual("live daemon keeps its roster", s?.apps.count, 1)
+    check("live daemon reports muted", s?.muted == true)
+    checkEqual("live daemon reports device", s?.device, "Scarlett")
+    checkEqual("version is parsed", s?.version, "0.4.1 (abc1234)")
+    checkEqual("exe is parsed", s?.exe, "/x/loudini-helper")
+
+    // An old daemon writes no pipeline key; with a live pid it must not read as broken.
+    writeRaw(#"{"running":true,"pid":\#(me)}"#, to: statusURL)
+    check("missing pipeline follows a live running", readStatus()?.pipeline == true)
+    checkEqual("missing version defaults empty", readStatus()?.version, "")
+    removeFixtures()
 }
 
 private func testReadStatusRoster() {
@@ -312,6 +354,17 @@ private func testReadStatusRoster() {
     checkEqual("in-range pid preserved", s?.apps.last?.pid, 42)
     checkEqual("roster gain clamped", s?.apps.last?.gain, 100)
     check("roster mute read", s?.apps.last?.muted == true)
+    // Every per-app write is keyed on the parsed bundle id, so it must come through intact.
+    checkEqual("roster bundle id read", s?.apps.first?.bundleID, "a")
+    checkEqual("roster name read", s?.apps.first?.name, "A")
+    check("roster active read", s?.apps.first?.active == true)
+    check("roster idle read", s?.apps.last?.active == false)
+
+    writeRaw(#"{"running":false,"apps":[{"pid":3}]}"#, to: statusURL)
+    let bare = readStatus()?.apps.first
+    checkEqual("missing bundle id defaults empty", bare?.bundleID, "")
+    checkEqual("missing name defaults empty", bare?.name, "")
+    check("missing active defaults true", bare?.active == true)
 
     // Old files predate `pipeline`; it follows running so an upgrade raises no false alarm.
     writeRaw(#"{"gain":30,"muted":false,"running":false,"device":"X"}"#, to: statusURL)
@@ -348,11 +401,139 @@ private func testAtomicWriteLeavesNoResidue() {
 
     // Overwriting must replace the file wholesale — a shorter payload must not leave the
     // tail of the longer one behind, which is the classic in-place-truncate bug.
+    let inodeBefore = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.systemFileNumber] as? Int
     let shorter = Data(#"{"a":1}"#.utf8)
     try! atomicWrite(shorter, to: target)
     checkEqual("atomic overwrite replaces, never appends", try? Data(contentsOf: target), shorter)
+    // rename(2) installs a new inode; an in-place write would keep the old one.
+    let inodeAfter = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.systemFileNumber] as? Int
+    check("atomic overwrite goes through a rename", inodeBefore != nil && inodeBefore != inodeAfter,
+          "inode \(String(describing: inodeBefore)) -> \(String(describing: inodeAfter))")
+    // The config files carry listening history, so they are owner-only.
+    let mode = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.posixPermissions] as? Int
+    checkEqual("atomic write leaves the file owner-only", mode, 0o600)
 
     try? FileManager.default.removeItem(at: target)
+}
+
+// MARK: - CLI helpers (AppTarget.swift)
+
+private func testParsePercent() {
+    checkEqual("percent 0", parsePercent("0"), 0)
+    checkEqual("percent 100", parsePercent("100"), 100)
+    check("percent 101 refused", parsePercent("101") == nil)
+    check("percent -1 refused", parsePercent("-1") == nil)
+    check("percent text refused", parsePercent("loud") == nil)
+}
+
+private func testResolveAppTarget() {
+    func row(_ id: String, _ name: String) -> AppEntry {
+        AppEntry(bundleID: id, name: name, pid: 1, gain: 100, muted: false, active: true)
+    }
+    let roster = [row("", "Music Helper"), row("com.spotify.client", "Spotify"),
+                  row("com.apple.Music", "Music"), row("com.example.musicbox", "Box")]
+    checkEqual("exact bundle id wins", resolveAppTarget("com.apple.Music", roster), "com.apple.Music")
+    checkEqual("exact name beats substring", resolveAppTarget("music", roster), "com.apple.Music")
+    checkEqual("name substring", resolveAppTarget("spot", roster), "com.spotify.client")
+    checkEqual("bundle id substring", resolveAppTarget("musicbox", roster), "com.example.musicbox")
+    check("bundle-less rows are skipped", resolveAppTarget("helper", roster) == nil)
+    check("empty token matches nothing", resolveAppTarget("", roster) == nil)
+    checkEqual("dotted token is a bundle id even off-roster", resolveAppTarget("com.x.y", []), "com.x.y")
+    check("plain unknown name matches nothing", resolveAppTarget("zoom", roster) == nil)
+}
+
+// MARK: - render-stall watchdog (StallMath.swift)
+
+private func testStallVerdict() {
+    func verdict(ticks: UInt64, last: UInt64, quietSince: TimeInterval, now: TimeInterval,
+                 active: Bool = true, pausedUntil: TimeInterval = 0) -> StallVerdict {
+        stallVerdict(ticks: ticks, lastTicks: last, quietSince: quietSince, now: now,
+                     anyAppActive: active, pausedUntil: pausedUntil, steadyWindow: 15, startupWindow: 60)
+    }
+    checkEqual("moving heartbeat re-arms", verdict(ticks: 5, last: 4, quietSince: 0, now: 100), .progressing)
+    checkEqual("idle never counts", verdict(ticks: 5, last: 5, quietSince: 0, now: 100, active: false), .progressing)
+    checkEqual("quiet under the window waits", verdict(ticks: 5, last: 5, quietSince: 100, now: 114), .waiting)
+    checkEqual("quiet for the window stalls", verdict(ticks: 5, last: 5, quietSince: 100, now: 115),
+               .stalled(window: 15))
+    checkEqual("never-rendered gets the startup window", verdict(ticks: 0, last: 0, quietSince: 100, now: 159),
+               .waiting)
+    checkEqual("never-rendered still stalls", verdict(ticks: 0, last: 0, quietSince: 100, now: 160),
+               .stalled(window: 60))
+    // Just after a sleep (DarkWake) the output does not run, so nothing may count yet.
+    checkEqual("paused after sleep", verdict(ticks: 0, last: 0, quietSince: 100, now: 160, pausedUntil: 190),
+               .progressing)
+    checkEqual("pause ends", verdict(ticks: 5, last: 5, quietSince: 190, now: 205, pausedUntil: 190),
+               .stalled(window: 15))
+
+    checkEqual("no sleep when both clocks agree", sleptSeconds(wallDelta: 2, uptimeDelta: 2), 0)
+    checkEqual("clock jitter is not sleep", sleptSeconds(wallDelta: 6, uptimeDelta: 2), 0)
+    checkEqual("a wall-clock jump past uptime is sleep", sleptSeconds(wallDelta: 902, uptimeDelta: 2), 900)
+
+    checkEqual("first stall rebuild uses the grace", stallRebuildWait(lastRebuild: nil, now: 1000, grace: 2, cooldown: 300), 2)
+    checkEqual("a recent rebuild stretches to the cooldown",
+               stallRebuildWait(lastRebuild: 1000, now: 1100, grace: 2, cooldown: 300), 200)
+    checkEqual("an old rebuild falls back to the grace",
+               stallRebuildWait(lastRebuild: 1000, now: 2000, grace: 2, cooldown: 300), 2)
+}
+
+// MARK: - per-output level memory (DeviceLevels.swift)
+
+private func testDeviceLevels() {
+    // A daemon start (no previous build) never overrides the level control.json holds.
+    let start = planDeviceSwitch(previousUID: nil, previousIsFixed: false, newUID: "scarlett", newIsFixed: true,
+                                 currentGain: 34, levels: ["scarlett": 80])
+    checkEqual("daemon start restores nothing", start, DeviceSwitchPlan(levels: ["scarlett": 80], applyGain: nil))
+
+    // Speakers (own volume) to the Scarlett: nothing stored for the speakers, Scarlett restored.
+    let toDac = planDeviceSwitch(previousUID: "speakers", previousIsFixed: false, newUID: "scarlett", newIsFixed: true,
+                                 currentGain: 34, levels: ["scarlett": 80])
+    checkEqual("switch to a fixed output restores its level", toDac,
+               DeviceSwitchPlan(levels: ["scarlett": 80], applyGain: 80))
+
+    // Leaving the Scarlett remembers where it was; the speakers keep their own hardware level.
+    let away = planDeviceSwitch(previousUID: "scarlett", previousIsFixed: true, newUID: "speakers", newIsFixed: false,
+                                currentGain: 55, levels: ["scarlett": 80])
+    checkEqual("leaving a fixed output remembers it", away, DeviceSwitchPlan(levels: ["scarlett": 55], applyGain: nil))
+
+    let unknown = planDeviceSwitch(previousUID: "speakers", previousIsFixed: false, newUID: "dac2", newIsFixed: true,
+                                   currentGain: 40, levels: [:])
+    checkEqual("a new fixed output inherits the current level", unknown, DeviceSwitchPlan(levels: [:], applyGain: nil))
+    let same = planDeviceSwitch(previousUID: "scarlett", previousIsFixed: true, newUID: "scarlett", newIsFixed: true,
+                                currentGain: 40, levels: ["scarlett": 80])
+    checkEqual("a rebuild on the same output changes nothing", same, DeviceSwitchPlan(levels: ["scarlett": 80], applyGain: nil))
+
+    try! writeDeviceLevels(["scarlett": 250, "dac": 30])
+    checkEqual("device levels round-trip clamped", readDeviceLevels(), ["scarlett": 100, "dac": 30])
+    writeRaw(#"{"good":{"gain":20},"bad":"x","":{"gain":5}}"#, to: deviceLevelsURL)
+    checkEqual("device levels parse leniently", readDeviceLevels(), ["good": 20])
+    writeRaw("not json", to: deviceLevelsURL)
+    checkEqual("malformed device levels read as empty", readDeviceLevels(), [String: Int]())
+    try? FileManager.default.removeItem(at: deviceLevelsURL)
+}
+
+// MARK: - control.lock
+
+/// Guards the lost-update fix: every read-modify-write must really hold control.lock.
+/// flock locks belong to an open file description, so a second open() in this same
+/// process contends like another process would.
+private func testControlLockIsHeld() {
+    let lockPath = configDir.appendingPathComponent("control.lock").path
+    var heldInside = false
+    withControlLock {
+        let fd = open(lockPath, O_RDWR)
+        defer { close(fd) }
+        heldInside = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK
+    }
+    check("withControlLock holds control.lock", heldInside)
+
+    let after = open(lockPath, O_RDWR)
+    check("control.lock is released afterwards", after >= 0 && flock(after, LOCK_EX | LOCK_NB) == 0)
+
+    // A holder that never lets go (a stopped process) must not block the caller forever.
+    var ran = false
+    withControlLock { ran = true }
+    check("withControlLock proceeds after a bounded wait", ran)
+    close(after)
 }
 
 // MARK: - status.json serialisation
@@ -375,6 +556,8 @@ private func testAppEntryJSON() {
 struct ControlFileTests {
     static func main() {
         requireSandboxedHome()
+        // scripts/test.sh probes the guard with this flag, so a broken guard runs no tests.
+        if CommandLine.arguments.contains("--guard-only") { exit(0) }
 
         testClampGain()
         testMultiplier()
@@ -384,9 +567,15 @@ struct ControlFileTests {
         testNudge()
         testPerAppMutators()
         testReadStatusDeadDaemon()
+        testReadStatusLiveDaemon()
         testReadStatusRoster()
         testReadStatusReason()
         testAtomicWriteLeavesNoResidue()
+        testControlLockIsHeld()
+        testParsePercent()
+        testResolveAppTarget()
+        testStallVerdict()
+        testDeviceLevels()
         testAppEntryJSON()
 
         guard failures.isEmpty else {

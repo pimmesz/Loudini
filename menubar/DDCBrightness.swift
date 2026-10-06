@@ -113,8 +113,8 @@ final class DDCBrightness {
     /// never drive concurrent I2C to the same chip — which corrupts the DDC
     /// transaction. Fail-open: proceed unlocked if the lock can't be taken.
     private func withBrightnessLock(_ body: () -> Void) {
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o644)
+        try? ensureConfigDir()
+        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o600)
         guard fd >= 0 else { return body() }
         defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
         flock(fd, LOCK_EX)
@@ -123,20 +123,29 @@ final class DDCBrightness {
 
     /// On `queue` only.
     private func applyLocked(_ newPercent: Int, done: @escaping (Int) -> Void) {
-        percentValue = clampGain(newPercent)
-        let raw = Int((Double(percentValue) / 100 * Double(maxValue)).rounded())
-        let p = percentValue
+        let p = clampGain(newPercent)
+        let raw = Int((Double(p) / 100 * Double(maxValue)).rounded())
+        var accepted = false
+        var lastError = IOReturn(KERN_SUCCESS)
         withBrightnessLock {
             for av in services {
-                writeLuminance(av, value: raw)
+                let r = writeLuminance(av, value: raw)
+                if r == KERN_SUCCESS { accepted = true } else { lastError = r }
                 usleep(20_000)  // some monitors drop back-to-back DDC writes
             }
+            // No display took it: keep the old level and skip the HUD rather than show a change.
+            guard accepted else { return }
+            percentValue = p
             // Publish to the shared brightness.json the CLI reads, so a
             // `loudini brightness up/down` steps from the value the app just
             // applied instead of a stale cache. Same file+lock as helper/DDC.swift.
             try? atomicWrite(
                 JSONSerialization.data(withJSONObject: ["percent": p], options: [.sortedKeys]),
                 to: configDir.appendingPathComponent("brightness.json"))
+        }
+        guard accepted else {
+            NSLog("Loudini: DDC brightness write failed on every display (IOReturn 0x%08x)", UInt32(bitPattern: lastError))
+            return
         }
         DispatchQueue.main.async {
             self.percent = p
@@ -200,11 +209,11 @@ final class DDCBrightness {
         return nil
     }
 
-    private func writeLuminance(_ av: CFTypeRef, value: Int) {
-        guard let writeI2C else { return }
+    private func writeLuminance(_ av: CFTypeRef, value: Int) -> IOReturn {
+        guard let writeI2C else { return IOReturn(KERN_FAILURE) }
         let v = UInt16(clamping: value)
         var data: [UInt8] = [0x84, 0x03, 0x10, UInt8(v >> 8), UInt8(v & 0xFF), 0]
         data[5] = 0x6E ^ 0x51 ^ data[0] ^ data[1] ^ data[2] ^ data[3] ^ data[4]
-        _ = data.withUnsafeMutableBytes { writeI2C(av, 0x37, 0x51, $0.baseAddress!, 6) }
+        return data.withUnsafeMutableBytes { writeI2C(av, 0x37, 0x51, $0.baseAddress!, 6) }
     }
 }

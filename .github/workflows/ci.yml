@@ -55,9 +55,12 @@ jobs:
           version: 10.12.1
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 24 for node --test type stripping; the shipped plugin still targets Node 20
+          # (manifest + build.mjs) until the Stream Deck SDK upgrade, see DECISIONS.md.
+          node-version: 24
           cache: pnpm
           cache-dependency-path: plugin/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm test
       - run: pnpm build

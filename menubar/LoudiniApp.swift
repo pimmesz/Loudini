@@ -25,6 +25,7 @@ enum LoudiniMain {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let step = 6  // % per key press — matches the CLI and Stream Deck
     private static let fineStep = 1  // % per key press when Shift is held (small adjust)
+    private static let volumeSliderTip = "Tip: hold Shift while you press a volume key to change the volume by 1%."
 
     private var statusItem: NSStatusItem!
     private var slider: NSSlider!
@@ -47,6 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // dynamically between `appsSeparator` and `resetAppsItem`.
     private var appsSeparator: NSMenuItem!
     private var emptyAppsItem: NSMenuItem!
+    /// Keeps "Reset App Volumes" a step away from the last app slider.
+    private var resetSeparator: NSMenuItem!
     private var resetAppsItem: NSMenuItem!
     /// Live row views keyed by roster row key (bundle id, or a pid-scoped key for
     /// bundle-less sources). Reused across renders so a drag survives a gain echo.
@@ -73,7 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// External-monitor brightness over DDC (no daemon involved).
     private let ddc = DDCBrightness()
-    private var wantsBrightnessGrab = true
+    /// Both key toggles are remembered, so turning one off sticks across launches
+    /// (otherwise the permission prompt and the warning badge come back every login).
+    private var wantsBrightnessGrab = UserDefaults.standard.object(forKey: "grabBrightnessKeys") as? Bool ?? true
     /// HID route for third-party keyboards whose brightness keys never become
     /// NX media-key events (e.g. Logitech).
     private var brightnessKeys: BrightnessKeyListener?
@@ -98,7 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// True while the menu is on screen, so an async update reply never inserts a
     /// row under the user's pointer mid-click.
     private var isMenuOpen = false
-    private var wantsKeyGrab = true
+    private var wantsKeyGrab = UserDefaults.standard.object(forKey: "grabVolumeKeys") as? Bool ?? true
+    /// Why the pipeline is down, from status.json ("render stalled", "no-device", ...).
+    private var lastReason = ""
+    /// An app that re-captures system audio is running (Conflicts.captureRivals).
+    private var isCaptureRivalRunning = false
+    /// The Accessibility repair ran this session; only then offer the Settings pane too.
+    private var didAttemptAXFix = false
     /// Last (gain, muted) seen running — HUD fires only when the level moves.
     private var lastLevel: (gain: Int, muted: Bool)?
 
@@ -206,10 +217,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         checkForUpdate()
 
         hud = HUDWindow()
+        showPermissionIntroOnce()
         ensureDaemon()
         // Recover a missing daemon while status shows it down (covers crashes,
-        // spawn races, and pgrep false positives — the daemon's own flock makes
-        // a redundant spawn harmless).
+        // and spawn races; the daemon's own flock makes a redundant spawn harmless,
+        // since it waits to take over rather than run a second engine).
         daemonRetryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             guard let self, !self.isQuitting, !self.lastStatusRunning else { return }
             self.ensureDaemon()
@@ -240,6 +252,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.nudgeBrightness(up ? step : -step)
         }
         brightnessKeys?.start()
+    }
+
+    /// One plain explanation before the first permission dialogs, so they don't arrive out
+    /// of nowhere from an app with no window. Shown once, and only on a fresh install.
+    private func showPermissionIntroOnce() {
+        guard !UserDefaults.standard.bool(forKey: "shownPermissionIntro"), !AXIsProcessTrusted() else { return }
+        UserDefaults.standard.set(true, forKey: "shownPermissionIntro")
+        let alert = NSAlert()
+        alert.messageText = "Loudini needs two permissions"
+        alert.informativeText = "Accessibility lets Loudini use your volume keys. "
+            + "System Audio Recording lets Loudini change the volume of your sound. "
+            + "Loudini does not record or save any sound."
+        alert.addButton(withTitle: "Continue")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -280,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // pairs a name with a value.
         let versionLabel = NSTextField(labelWithString: "v\(Self.appVersion)")
         versionLabel.font = .systemFont(ofSize: 11)
-        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.textColor = .secondaryLabelColor
         versionLabel.sizeToFit()
         versionLabel.setFrameOrigin(NSPoint(x: nameLabel.frame.maxX + 6, y: 10))
         headerLevelLabel = NSTextField(labelWithString: "100%")
@@ -310,6 +337,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                           target: self, action: #selector(sliderMoved(_:)))
         slider.isContinuous = true
         slider.frame = NSRect(x: 34, y: 3, width: 210, height: 24)
+        slider.setAccessibilityLabel("Volume")
+        slider.toolTip = Self.volumeSliderTip
         row.addSubview(quiet)
         row.addSubview(slider)
         row.addSubview(loud)
@@ -329,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     target: self, action: #selector(brightnessSliderMoved(_:)))
         brightnessSlider.isContinuous = true
         brightnessSlider.frame = NSRect(x: 34, y: 3, width: 210, height: 24)
+        brightnessSlider.setAccessibilityLabel("Brightness")
         bRow.addSubview(dim)
         bRow.addSubview(brightnessSlider)
         bRow.addSubview(brightIcon)
@@ -343,7 +373,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         muteItem.image = NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: nil)
         menu.addItem(muteItem)
 
-        deviceItem = NSMenuItem(title: "Daemon not running",
+        deviceItem = NSMenuItem(title: "Volume engine is not running",
                                 action: #selector(openAudioCaptureSettings), keyEquivalent: "")
         deviceItem.target = self
         deviceItem.isEnabled = false  // becomes clickable only in the "fix permission" state
@@ -351,58 +381,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(deviceItem)
 
         // Shown only when a known media-key grabber is running (menuWillOpen).
+        // Enabled (full contrast) although it has no action: it is a message to read.
         conflictItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        conflictItem.isEnabled = false
+        conflictItem.isEnabled = true
         conflictItem.isHidden = true
         conflictItem.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                                      accessibilityDescription: "warning")
         menu.addItem(conflictItem)
 
-        // Per-app volume section. Rows are inserted at runtime (renderApps)
-        // between this separator and the reset item; the empty-state line shows
-        // when nothing is playing, matching macOS's own Sound per-app list.
-        appsSeparator = .separator()
-        menu.addItem(appsSeparator)
-        emptyAppsItem = NSMenuItem(title: "No apps are playing audio", action: nil, keyEquivalent: "")
-        emptyAppsItem.isEnabled = false
-        menu.addItem(emptyAppsItem)
-        resetAppsItem = NSMenuItem(title: "Reset App Volumes",
-                                   action: #selector(resetAppsClicked), keyEquivalent: "")
-        resetAppsItem.target = self
-        resetAppsItem.image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: nil)
-        resetAppsItem.isHidden = true
-        menu.addItem(resetAppsItem)
-
-        menu.addItem(.separator())
-
-        grabKeysItem = NSMenuItem(title: "Grab Volume Keys",
-                                  action: #selector(toggleGrabKeys), keyEquivalent: "")
-        grabKeysItem.target = self
-        grabKeysItem.state = .on
-        grabKeysItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
-        menu.addItem(grabKeysItem)
-
-        grabBrightnessItem = NSMenuItem(title: "Grab Brightness Keys",
-                                        action: #selector(toggleGrabBrightness), keyEquivalent: "")
-        grabBrightnessItem.target = self
-        grabBrightnessItem.state = .on
-        grabBrightnessItem.isHidden = true
-        grabBrightnessItem.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: nil)
-        menu.addItem(grabBrightnessItem)
-
-        // Brightness keys on third-party keyboards need Input Monitoring to be
-        // captured at the HID layer. Shown only when that's the missing piece.
-        inputMonitoringItem = NSMenuItem(title: "Enable Brightness Keys (Input Monitoring)…",
-                                         action: #selector(enableInputMonitoring), keyEquivalent: "")
-        inputMonitoringItem.target = self
-        inputMonitoringItem.isHidden = true
-        inputMonitoringItem.image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)
-        menu.addItem(inputMonitoringItem)
-
-        // The rebuild-invalidated-grant trap: Settings shows the toggle ON while
-        // macOS denies the new binary. One click wipes our TCC entry and
-        // re-prompts fresh.
-        fixPermissionItem = NSMenuItem(title: "Fix Volume-Key Permission…",
+        // Volume-key permission fix, next to the other "something is wrong" rows.
+        // One row; the Settings pane is offered only once the repair already ran.
+        fixPermissionItem = NSMenuItem(title: "Allow Volume Keys…",
                                        action: #selector(fixAccessibilityClicked), keyEquivalent: "")
         fixPermissionItem.target = self
         fixPermissionItem.isHidden = true
@@ -416,6 +405,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accessibilityItem.isHidden = true
         accessibilityItem.image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)
         menu.addItem(accessibilityItem)
+
+        // Per-app volume section. Rows are inserted at runtime (renderApps)
+        // between this separator and the reset item; the empty-state line shows
+        // when nothing is playing, matching macOS's own Sound per-app list.
+        appsSeparator = .separator()
+        menu.addItem(appsSeparator)
+        emptyAppsItem = NSMenuItem(title: "No apps are playing audio", action: nil, keyEquivalent: "")
+        emptyAppsItem.isEnabled = false
+        menu.addItem(emptyAppsItem)
+        resetSeparator = .separator()
+        resetSeparator.isHidden = true
+        menu.addItem(resetSeparator)
+        resetAppsItem = NSMenuItem(title: "Reset App Volumes",
+                                   action: #selector(resetAppsClicked), keyEquivalent: "")
+        resetAppsItem.target = self
+        resetAppsItem.toolTip = "Sets every app back to 100% and unmutes them."
+        resetAppsItem.image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: nil)
+        resetAppsItem.isHidden = true
+        menu.addItem(resetAppsItem)
+
+        menu.addItem(.separator())
+
+        grabKeysItem = NSMenuItem(title: "Use Volume Keys",
+                                  action: #selector(toggleGrabKeys), keyEquivalent: "")
+        grabKeysItem.target = self
+        grabKeysItem.state = wantsKeyGrab ? .on : .off
+        grabKeysItem.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
+        menu.addItem(grabKeysItem)
+
+        grabBrightnessItem = NSMenuItem(title: "Use Brightness Keys",
+                                        action: #selector(toggleGrabBrightness), keyEquivalent: "")
+        grabBrightnessItem.target = self
+        grabBrightnessItem.state = wantsBrightnessGrab ? .on : .off
+        grabBrightnessItem.isHidden = true
+        grabBrightnessItem.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: nil)
+        menu.addItem(grabBrightnessItem)
+
+        // Brightness keys on third-party keyboards need Input Monitoring to be
+        // captured at the HID layer. Shown only when that's the missing piece.
+        inputMonitoringItem = NSMenuItem(title: "Enable Brightness Keys (Input Monitoring)…",
+                                         action: #selector(enableInputMonitoring), keyEquivalent: "")
+        inputMonitoringItem.target = self
+        inputMonitoringItem.isHidden = true
+        inputMonitoringItem.image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)
+        menu.addItem(inputMonitoringItem)
 
         menu.addItem(.separator())
 
@@ -443,6 +477,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // opens the releases page — Loudini never downloads or installs itself.
         updateItem = NSMenuItem(title: "", action: #selector(updateClicked), keyEquivalent: "")
         updateItem.target = self
+        updateItem.toolTip = "Opens the download page. Open the new Loudini.dmg and drag Loudini "
+            + "to Applications. Your settings stay."
         updateItem.isHidden = true
         updateItem.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
         menu.addItem(updateItem)
@@ -479,7 +515,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ddc.isAvailable { brightnessSlider.doubleValue = Double(ddc.percent) }
         if let rival = runningRival() {
             conflictItem.title = Conflicts.problem(for: rival)
-            conflictItem.toolTip = "Fix: \(Conflicts.fixHint(for: rival))"
+            // The fix is visible on the row itself, not hidden in a hover tooltip.
+            conflictItem.subtitle = Conflicts.fixHint(for: rival)
             conflictItem.isHidden = false
         } else {
             conflictItem.isHidden = true
@@ -497,21 +534,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Compute the "Output: …" menu row's (title, enabled, tooltip) from plain values in one
     // exhaustive switch — no force-unwraps, one assignment site instead of a 4-way if/else.
-    private func updateDeviceItem(running: Bool, pipelineOK: Bool, reason: String, device: String) {
+    private func updateDeviceItem(running: Bool, pipelineOK: Bool, reason: String, device: String,
+                                  daemonVersion: String) {
         let title: String, enabled: Bool, toolTip: String?
         switch (running, pipelineOK) {
         case (false, _):
-            title = "Daemon not running"; enabled = false; toolTip = nil
+            title = "Volume engine is not running"; enabled = false
+            toolTip = "Loudini tries to start it every few seconds."
         case (true, false) where reason == "no-device":
             title = "No output device"; enabled = false; toolTip = nil
+        case (true, false) where reason == "render stalled":
+            // Not a permission problem: the daemon tore its audio path down and rebuilds
+            // it by itself. Nothing to click, and the same advice `loudini doctor` gives.
+            title = "Volume control is restarting"; enabled = false
+            toolTip = "Loudini lost control of the sound and will try again by itself. "
+                + "This can take up to 5 minutes. Until then, the sound plays without Loudini's volume."
         case (true, false):
             // Permission is the most likely cause, but the daemon can't distinguish it
-            // from other capture failures — say so honestly and still make the row the fix.
-            title = "Audio capture not working — click to fix"; enabled = true
-            toolTip = "Most likely the System Audio Recording permission."
-                + (reason.isEmpty ? "" : " Daemon reports: \(reason)")
+            // from other capture failures, so the row hedges and still opens the fix.
+            title = "Volume control is off. Check permission…"; enabled = true
+            toolTip = "Loudini most likely needs System Audio Recording. Click to open System Settings, "
+                + "then turn on Loudini." + (reason.isEmpty ? "" : " Details: \(reason)")
         case (true, true):
-            title = "Output: \(device.isEmpty ? "default device" : device)"; enabled = false; toolTip = nil
+            title = "Output: \(device.isEmpty ? "default device" : device)"; enabled = false
+            // Another Loudini copy (LaunchAgent, Stream Deck plugin) can own the audio engine.
+            // An empty version is a daemon too old to report one.
+            toolTip = daemonVersion.isEmpty || daemonVersion == loudiniVersion ? nil
+                : "The audio engine is build \(daemonVersion), this app is \(loudiniVersion). "
+                + "Quit other Loudini copies (LaunchAgent, Stream Deck plugin), then reopen Loudini."
         }
         deviceItem.title = title
         deviceItem.isEnabled = enabled
@@ -528,6 +578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let muted = running ? (status?.muted ?? control.muted) : control.muted
 
         lastPipelineOK = status?.pipeline ?? false
+        lastReason = status?.reason ?? ""
         lastShownGain = gain
         lastShownMuted = muted
         renderStatusItem()
@@ -535,10 +586,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !(slider.cell?.isHighlighted ?? false) {
             slider.doubleValue = Double(gain)
         }
-        headerLevelLabel.stringValue = !running ? "off" : muted ? "Muted" : "\(gain)%"
+        headerLevelLabel.stringValue = !running ? "Off" : muted ? "Muted" : "\(gain)%"
+        // A slider move while Loudini has no control is only saved for later; say so.
+        slider.toolTip = running && lastPipelineOK ? Self.volumeSliderTip
+            : "Loudini cannot change the volume right now. Your choice is used when it works again."
         muteItem.state = muted ? .on : .off
         updateDeviceItem(running: running, pipelineOK: lastPipelineOK,
-                         reason: status?.reason ?? "", device: status?.device ?? "")
+                         reason: status?.reason ?? "", device: status?.device ?? "",
+                         daemonVersion: status?.version ?? "")
 
         // Per-app rows reflect the daemon's roster; the reset affordance appears
         // whenever any override exists in control.json (even for a silent app).
@@ -564,7 +619,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         let healthy = lastStatusRunning && lastPipelineOK
         let keysDead = wantsKeyGrab && keyTap?.isRunning != true
-        let badge = keysDead || (lastStatusRunning && !lastPipelineOK) ? " ⚠︎" : ""
+        // A render stall rebuilds by itself, so it is not something the user must fix.
+        let needsFix = lastStatusRunning && !lastPipelineOK && lastReason != "render stalled"
+        let badge = keysDead || needsFix || isCaptureRivalRunning ? " ⚠︎" : ""
         // The level-bars mark: crossed-out when muted, and colour or monochrome
         // template to match the user's icon setting (so mute isn't the odd one
         // out, and never a colour emoji).
@@ -576,13 +633,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.title = " \(lastShownMuted ? "Muted" : "\(lastShownGain)%")" + badge
         button.appearsDisabled = !healthy
         if !lastStatusRunning {
-            button.toolTip = "Loudini — daemon not running"
+            button.toolTip = "Loudini: the volume engine is not running. Loudini tries to start it every few seconds."
         } else if !lastPipelineOK {
-            button.toolTip = "Loudini — no audio control: grant System Audio Recording (open the menu)"
+            button.toolTip = "Loudini: volume control is off. Open the menu to see why."
+        } else if isCaptureRivalRunning {
+            button.toolTip = "Loudini: another sound app is open. Open the menu to see which."
         } else if keysDead {
-            button.toolTip = "Loudini — volume keys need Accessibility (open the menu)"
+            button.toolTip = "Loudini: the volume keys need a permission. Open the menu to fix it."
         } else {
-            button.toolTip = "Loudini — \(lastShownMuted ? "muted" : "\(lastShownGain)%")"
+            button.toolTip = "Loudini: \(lastShownMuted ? "muted" : "\(lastShownGain)%")"
         }
     }
 
@@ -597,7 +656,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func sliderMoved(_ sender: NSSlider) {
         let gain = Int(sender.doubleValue.rounded())
-        headerLevelLabel.stringValue = "\(gain)%"  // instant feedback; status echo follows
+        // Instant feedback, but only when it is real: otherwise keep "Off" and friends.
+        if lastStatusRunning && lastPipelineOK { headerLevelLabel.stringValue = "\(gain)%" }
         writeControlChange { try ControlOps.set(gain: gain) }
     }
 
@@ -626,6 +686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         emptyAppsItem.isHidden = !apps.isEmpty
         // Only offer the reset when there's actually an override to clear.
         resetAppsItem.isHidden = !hasOverrides
+        resetSeparator.isHidden = !hasOverrides
 
         let keys = apps.map(Self.rowKey)
         if keys == shownAppKeys {
@@ -641,7 +702,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // inserting just above the reset item.
         for row in appRows.values { menu.removeItem(row.item) }
         appRows.removeAll()
-        var idx = menu.index(of: resetAppsItem)
+        var idx = menu.index(of: resetSeparator)
         for a in apps {
             let row = makeAppRow(a)
             if idx >= 0 { menu.insertItem(row.item, at: idx); idx += 1 }
@@ -653,17 +714,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func makeAppRow(_ a: AppEntry) -> AppRowViews {
         let item = NSMenuItem()
-        let row = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 42))
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 50))
 
-        let icon = NSImageView(frame: NSRect(x: 16, y: 21, width: 18, height: 18))
+        let icon = NSImageView(frame: NSRect(x: 16, y: 27, width: 18, height: 18))
         icon.imageScaling = .scaleProportionallyUpOrDown
 
         let name = NSTextField(labelWithString: a.name)
         name.font = .systemFont(ofSize: 12)
         name.lineBreakMode = .byTruncatingTail
-        name.frame = NSRect(x: 40, y: 23, width: 196, height: 15)
+        name.frame = NSRect(x: 40, y: 29, width: 192, height: 15)
 
-        let mute = NSButton(frame: NSRect(x: 244, y: 20, width: 22, height: 22))
+        // At least 24 pt, with a gap above the slider, so a shaky click mutes instead of sliding.
+        let mute = NSButton(frame: NSRect(x: 238, y: 24, width: 28, height: 24))
         mute.isBordered = false
         mute.bezelStyle = .regularSquare
         mute.imagePosition = .imageOnly
@@ -683,7 +745,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         slider.isEnabled = addressable
         mute.isEnabled = addressable
         if !addressable {
-            let tip = "No bundle id — per-app volume can't target this source"
+            let tip = "Loudini cannot change the volume of this app on its own."
             slider.toolTip = tip
             mute.toolTip = tip
         }
@@ -699,6 +761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateAppRow(_ row: AppRowViews?, _ a: AppEntry) {
         guard let row else { return }
         row.name.stringValue = a.name
+        row.slider.setAccessibilityLabel("\(a.name) volume")
         // Dim a lingering (idle) app so the live ones read first.
         row.name.textColor = a.active ? .labelColor : .secondaryLabelColor
         // pid_t(exactly:) — never trap on an out-of-range pid; nil falls back.
@@ -752,14 +815,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleGrabBrightness() {
         wantsBrightnessGrab.toggle()
+        UserDefaults.standard.set(wantsBrightnessGrab, forKey: "grabBrightnessKeys")
         grabBrightnessItem.state = wantsBrightnessGrab ? .on : .off
     }
 
     /// Register the app for Input Monitoring (adds it to the list + prompts),
     /// then open that settings pane so the user can flip the toggle.
     @objc private func enableInputMonitoring() {
-        BrightnessKeyListener.requestAccess()
-        brightnessKeys?.start()  // ensure the manager is open so macOS lists us
+        BrightnessKeyListener.requestAccess()  // the one place that prompts; it also lists us
+        brightnessKeys?.start()
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
             NSWorkspace.shared.open(url)
         }
@@ -834,6 +898,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Picks the brightness keys up once Input Monitoring is granted,
             // without needing a relaunch. No-op while it's already running.
             if self.wantsBrightnessGrab { self.brightnessKeys?.start() }
+            self.isCaptureRivalRunning = self.runningRival().map(Conflicts.isCaptureRival) ?? false
             self.refreshPermissionUI()
             self.renderStatusItem()
         }
@@ -841,21 +906,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refreshPermissionUI() {
         let trusted = AXIsProcessTrusted()
-        accessibilityItem.isHidden = trusted
-        fixPermissionItem.isHidden = trusted
-        // Stale grant (we were trusted before a rebuild changed our ad-hoc
+        let needsFix = !trusted && wantsKeyGrab
+        fixPermissionItem.isHidden = !needsFix
+        accessibilityItem.isHidden = !(needsFix && didAttemptAXFix)
+        // A grant that stopped working (macOS revoked it, or a rebuild changed the app's
         // identity) reads differently from a never-granted install.
-        fixPermissionItem.title = UserDefaults.standard.bool(forKey: "wasEverAXTrusted")
-            ? "Repair Volume-Key Permission (app was rebuilt)…"
-            : "Fix Volume-Key Permission…"
+        if UserDefaults.standard.bool(forKey: "wasEverAXTrusted") {
+            fixPermissionItem.title = "Repair Volume Keys…"
+            fixPermissionItem.toolTip = "The volume keys stopped working. Click to reset the permission. "
+                + "Then turn on Loudini again in the list."
+        } else {
+            fixPermissionItem.title = "Allow Volume Keys…"
+            fixPermissionItem.toolTip = "macOS asks for the Accessibility permission. Turn on Loudini in the list."
+        }
         grabKeysItem.title = trusted || !wantsKeyGrab
-            ? "Grab Volume Keys"
-            : "Grab Volume Keys (needs Accessibility)"
+            ? "Use Volume Keys"
+            : "Use Volume Keys (needs permission)"
         grabKeysItem.state = wantsKeyGrab ? .on : .off
     }
 
     @objc private func toggleGrabKeys() {
         wantsKeyGrab.toggle()
+        UserDefaults.standard.set(wantsKeyGrab, forKey: "grabVolumeKeys")
         if wantsKeyGrab {
             setupKeyTap(promptIfNeeded: true)
         } else {
@@ -927,7 +999,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var updateTask: URLSessionDataTask?
 
     /// Ask GitHub for the latest release tag, at most once a day. Unauthenticated,
-    /// no query params, no auth, nothing identifying the user.
+    /// no query params, no cookies: GitHub sees only the IP address the request comes from.
     /// We set User-Agent to a bare "Loudini" deliberately: GitHub rejects a request
     /// without one (403), and CFNetwork's default would otherwise announce the exact
     /// Darwin kernel build — this sends strictly less.
@@ -966,7 +1038,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showUpdateRow(_ tag: String) {
         guard !isQuitting else { return }
         let shouldShow = wantsUpdateCheck && Self.isNewer(tag, than: Self.appVersion)
-        if shouldShow { updateItem.title = "Update available: \(tag)" }
+        if shouldShow { updateItem.title = "Download Update (\(tag))…" }
         // Never change the menu's HEIGHT while it is on screen — in either
         // direction. A reply landing mid-click would shift every row below it,
         // including Quit, under the pointer. The tag is cached, so the next open
@@ -1009,6 +1081,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// that ad-hoc re-signing causes: wipe our own TCC Accessibility entry,
     /// then ask again so a fresh prompt appears.
     @objc private func fixAccessibilityClicked() {
+        didAttemptAXFix = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
@@ -1038,7 +1111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         } catch {
             NSLog("Loudini: could not change login item: %@", error.localizedDescription)
+            // Usually the item was switched off in System Settings, which must allow it again.
+            SMAppService.openSystemSettingsLoginItems()
         }
+        if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
         loginItem.state = service.status == .enabled ? .on : .off
     }
 
@@ -1052,11 +1128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let d = daemon, d.isRunning { return }
         let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/gg.pim.loudini.plist"
         let hasAgent = FileManager.default.fileExists(atPath: plistPath)
-        // pgrep/launchctl block on waitUntilExit — keep them off the main
+        // launchctl blocks on waitUntilExit, so keep it off the main
         // thread (the event-tap callback lives there). The daemon's flock
-        // makes any race here harmless: a redundant instance exits by itself.
+        // makes any race here harmless: a redundant instance waits its turn.
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            if Self.isDaemonProcessAlive() { return }
+            if Self.isDaemonAlive() { return }
             if hasAgent {
                 // The user installed the LaunchAgent — revive it rather than
                 // spawning our own: kickstart restarts a loaded job, bootstrap
@@ -1069,7 +1145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // once after a grace period and fall back to our bundled
                 // daemon — the flock arbitrates if the agent comes up too.
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
-                    guard !Self.isDaemonProcessAlive() else { return }
+                    guard !Self.isDaemonAlive() else { return }
                     NSLog("Loudini: LaunchAgent did not produce a daemon — falling back to the bundled one")
                     DispatchQueue.main.async {
                         guard let self, !self.isQuitting else { return }
@@ -1110,17 +1186,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return runBounded(p) ?? -1
     }
 
-    /// True when any of OUR loudini-helper processes is up (scoped to this
-    /// user — another account's daemon must not suppress ours). A CLI
-    /// invocation can match too — that false positive only delays the spawn
-    /// by one 5 s retry tick.
-    private static func isDaemonProcessAlive() -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-U", "\(getuid())", "-x", "loudini-helper"]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        return runBounded(p) == 0
+    /// True when a daemon holds daemon.lock, the same liveness test doctor uses. pgrep
+    /// would also match a short-lived CLI run. The probe takes a shared lock and drops it
+    /// at once, so it only fails while a daemon holds the exclusive one.
+    private static func isDaemonAlive() -> Bool {
+        let fd = open(configDir.appendingPathComponent("daemon.lock").path, O_RDONLY)
+        guard fd >= 0 else { return false }   // no daemon has ever run here
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) == 0 {
+            flock(fd, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK
     }
 
     private func spawnDaemon() {
@@ -1139,7 +1216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // No immediate respawn on exit: the 5 s daemonRetryTimer recovers it,
         // which doubles as backoff if the daemon dies instantly every time.
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] proc in
+            // The daemon cannot log its own crash, so record it here. Exit 0 is the
+            // routine lost-the-lock exit and stays quiet.
+            if proc.terminationReason == .uncaughtSignal || proc.terminationStatus != 0 {
+                let how = proc.terminationReason == .uncaughtSignal ? "signal" : "exit"
+                NSLog("Loudini: daemon pid %d exited (%@ %d)", proc.processIdentifier, how, proc.terminationStatus)
+            }
             DispatchQueue.main.async { self?.daemon = nil }
         }
         do {
@@ -1153,12 +1236,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func daemonLogHandle() -> FileHandle? {
         let url = configDir.appendingPathComponent("daemon.log")
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try? ensureConfigDir()
+        // Rotate here, before the open: a daemon already holds its log open, so it
+        // cannot rotate its own file. One old generation is kept.
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
+           size > 1_000_000 {
+            let old = configDir.appendingPathComponent("daemon.log.1")
+            try? FileManager.default.removeItem(at: old)
+            try? FileManager.default.moveItem(at: url, to: old)
+        }
         // O_APPEND so every write atomically lands at EOF. launchd opens this same
         // daemon.log O_APPEND for its agent daemon; a fixed-offset FileHandle
         // (seekToEndOfFile) would let the two clobber each other during a handoff.
-        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
-        guard fd >= 0 else { return nil }
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+        guard fd >= 0 else {
+            NSLog("Loudini: cannot open daemon.log (%@), daemon output will be lost", String(cString: strerror(errno)))
+            return nil
+        }
         return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 }

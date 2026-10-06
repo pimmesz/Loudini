@@ -196,6 +196,8 @@
   .slider .kn { position: absolute; top: 50%; left: var(--v, 72%); width: 15px; height: 15px;
                 transform: translate(-50%, -50%); border-radius: 50%;
                 background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); }
+  /* the live demo is a real control, so its empty track needs 3:1 against the menu */
+  .slider.live .tr { background: rgba(255, 255, 255, 0.36); }
   .slider.live { cursor: grab; }
   .slider.live:active { cursor: grabbing; }
 
@@ -231,11 +233,17 @@
   .duo strong { color: var(--t1); font-weight: 530; }
 
   /* watermark footer: the one indulgence */
+  /* text for screen readers only */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
   footer { margin-top: 5rem; position: relative; }
   footer .meta {
     display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem;
     padding: 1.4rem 0 0.5rem; border-top: 1px solid var(--line);
-    color: var(--t4); font-size: 0.85rem;
+    color: var(--t3); font-size: 0.85rem;
   }
   footer .meta a { color: var(--t3); text-decoration: underline; text-underline-offset: 3px; }
   .watermark {
@@ -255,10 +263,10 @@
 <body>
 
 <div class="wrap">
-  <div class="top rise d1">
+  <header class="top rise d1">
     <span class="mark">Loudini</span>
     <a class="gh" href="https://github.com/pimmesz/Loudini">GitHub &rarr;</a>
-  </div>
+  </header>
 
   <main>
     <section class="hero">
@@ -291,11 +299,14 @@
         <a class="btn ghost" href="https://github.com/pimmesz/Loudini">View on GitHub</a>
       </div>
       <p class="trust rise d3">Free &amp; open source &middot; macOS 14.4+ (Apple Silicon) &middot; no drivers, no kexts</p>
+      <p class="trust rise d3">Once a day it asks GitHub whether a newer version exists, which shares your IP address with GitHub and nothing else. Turn it off in the menu.</p>
     </section>
 
+    <h2 class="sr-only">Try the menu</h2>
     <div class="stage rise d4">
       <div class="frame">
-        <div class="menu" role="group" aria-label="Loudini's menu bar dropdown, recreated. The volume slider works.">
+        <div class="menu" role="group" aria-label="Loudini's menu bar dropdown, recreated. The volume slider works." aria-describedby="menu-desc">
+          <p class="sr-only" id="menu-desc">The menu shows a volume slider, a brightness slider, Mute, the current output (Scarlett 2i2 4th Gen), Use Volume Keys and Use Brightness Keys (both on), Start at Login and Quit.</p>
           <div class="hrow">
             <svg class="mlogo" viewBox="0 0 1024 1024" aria-hidden="true">
               <g fill="url(#mk)">
@@ -325,8 +336,8 @@
           <div class="row" aria-hidden="true"><span class="sf">&#128263;</span>Mute</div>
           <div class="row dim" aria-hidden="true"><span class="sf">&#128362;</span>Output: Scarlett 2i2 4th Gen</div>
           <div class="sep"></div>
-          <div class="row" aria-hidden="true"><span class="sf">&#9000;</span>Grab Volume Keys<span class="check">&#10003;</span></div>
-          <div class="row" aria-hidden="true"><span class="sf">&#9728;</span>Grab Brightness Keys<span class="check">&#10003;</span></div>
+          <div class="row" aria-hidden="true"><span class="sf">&#9000;</span>Use Volume Keys<span class="check">&#10003;</span></div>
+          <div class="row" aria-hidden="true"><span class="sf">&#9728;</span>Use Brightness Keys<span class="check">&#10003;</span></div>
           <div class="sep"></div>
           <div class="row" aria-hidden="true"><span class="sf">&#8618;</span>Start at Login</div>
           <div class="row" aria-hidden="true"><span class="sf">&#10005;</span>Quit Loudini</div>
@@ -343,6 +354,7 @@
     </div>
 
     <section style="text-align: center;">
+      <h2 class="sr-only">Read the docs</h2>
       <p class="duo"><strong>Your audio interface already sounds right.</strong> It just needs a volume control your keyboard can reach.</p>
       <a class="btn" href="https://github.com/pimmesz/Loudini" style="margin-top: 1.6rem;">Read the full docs</a>
     </section>

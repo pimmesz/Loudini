@@ -18,7 +18,9 @@ volume.
 **The engine** is a driverless Core Audio **process tap** (already built + verified): a Swift daemon
 taps every output-producing process except itself, mutes their direct path (`.mutedWhenTapped`), and
 re-renders the mix to the current default output through an IOProc that multiplies each sample by a
-software gain. It **fails open**: if the daemon dies, `coreaudiod` tears down the private tap/aggregate
+software gain. On an output that owns a settable volume, the daemon drives that device volume directly
+with two-way sync and keeps the software gain at pass-through (mute and per-app levels still apply);
+the software gain is the master only on fixed-level devices. It **fails open**: if the daemon dies, `coreaudiod` tears down the private tap/aggregate
 and audio returns to normal. No driver, no admin, no kext.
 
 ## The architecture: one core, many thin frontends (read this twice)
@@ -83,7 +85,8 @@ atomic-write helper, and both the LaunchAgent and the Stream Deck plugin ship th
   (lenient parse: bad/partial JSON keeps the last good value).
   **A writer that owns only `gain`/`muted` MUST read-modify-write, never replace the document.**
   Emitting just `{"gain":…,"muted":…}` erases the `apps` map and every per-app override with it.
-- **`~/.config/loudini/status.json`** holds `{"gain","muted","running","pipeline","device","pid","reason"?,"apps"}`.
+- **`~/.config/loudini/status.json`** holds `{"gain","muted","running","pipeline","device","pid","reason"?,"apps",
+  "version"?,"exe"?}` (`version`/`exe` are additive: the daemon's build string and binary path).
   `pipeline` is the capture pipeline's health (a daemon can be `running:true` with `pipeline:false` when
   the System Audio Recording grant is missing). `pid` is what readers probe to catch a hard-killed
   daemon: treat the file as `running:false` when that process is gone. Omitting either is how a frontend
@@ -93,20 +96,26 @@ atomic-write helper, and both the LaunchAgent and the Stream Deck plugin ship th
   `[{bundleID,name,pid,gain,muted,active}]`. See `SPEC-per-app-volume.md`. `loudini apps` prints it.
 - **`~/.config/loudini/brightness.json`** holds `{"percent": <int 0-100>}`. The single shared source of
   truth for external-display brightness: the CLI (`helper/DDC.swift`) and the menu-bar app
-  (`menubar/DDCBrightness.swift`) both write it under `brightness.lock` on every apply, so a relative
-  step never runs off a stale base. See `DECISIONS.md`.
+  (`menubar/DDCBrightness.swift`) both write it under `brightness.lock` on every apply. The CLI steps
+  from it; the app steps from its own level, reseeded from the monitor at launch and on a display
+  change. See `DECISIONS.md`.
+- **`~/.config/loudini/devices.json`** holds `{"<device UID>": {"gain": <int 0-100>}}`: the last master
+  level per fixed-level output (`helper/DeviceLevels.swift`). Daemon-owned and additive. It stays out
+  of `control.json` on purpose, because `writeControl` writes only `gain`/`muted`/`apps`. Saved on a
+  device switch and on shutdown, never per key press; a daemon start restores nothing, since
+  `control.json` already holds the user's last level.
 - **`~/.config/loudini/control.lock`** guards the read-modify-write itself. The atomic rename stops a
   torn file but not a lost update: a per-app override written between another writer's read and its
   rename vanishes. Every Swift frontend wraps its RMW in an exclusive `flock(2)` on this file
-  (`withControlLock` in `ControlFile.swift`). The Node plugin is the documented exception, because
-  Node has no `flock(2)`: it writes only master `gain`/`muted` and merges the keys it does not own,
-  which narrows the lost-update window but does not close it. See `DECISIONS.md`.
+  (`withControlLock` in `ControlFile.swift`). The Node plugin has no `flock(2)`, so it never writes
+  `control.json` itself: each key press runs the bundled CLI, which takes the lock. See `DECISIONS.md`.
   `brightness.lock` plays the same role for `brightness.json`.
 - **All writes to `control.json` MUST be atomic** (write a temp file in the same dir, then `rename()`),
   because up to three frontends may write it concurrently and the daemon reads it mid-write. This is the
   #1 thing to get right and the #1 thing to have Codex check.
 
-**Gate:** `scripts/test.sh`, the contract regression tests (`helper/ControlFileTests.swift`). Run it
+**Gate:** `scripts/test.sh`, the contract regression tests (`helper/ControlFileTests.swift`), plus
+`pnpm test` in `plugin/` for the plugin's status parsing (`plugin/test/control.test.ts`, Node 22.18+). Run it
 after any change to `helper/ControlFile.swift`; `ci.yml`'s `test` job runs it on every push and PR that
 touches a non-docs path. It pins the invariants above: per-app overrides survive a master-only write,
 lenient parsing keeps the last good value, gains clamp to 0-100, a dead daemon can't claim
@@ -320,11 +329,11 @@ brew install openssl@3     # once: macOS ships LibreSSL, which has no `-legacy` 
 scripts/make-dev-cert.sh
 ```
 
-The script needs OpenSSL 3 first on `PATH`. `openssl pkcs12 -export -legacy` is the only way to mint
-a PKCS#12 that macOS's Security framework can import, and `-legacy` does not exist in LibreSSL, so on
-a Mac without Homebrew's `openssl@3` the script aborts after minting the key and no `Loudini Dev`
-identity is created. `build-app.sh` then silently falls back to ad-hoc signing and the grants keep
-dying on every rebuild. The script checks this itself and exits with that instruction.
+The script needs Homebrew's OpenSSL 3 (`brew install openssl@3`). It finds it via `brew --prefix`,
+so no `PATH` change is needed. `openssl pkcs12 -export -legacy` is the only way to mint a PKCS#12
+that macOS's Security framework can import, and `-legacy` does not exist in LibreSSL. Without
+`openssl@3` the script stops before minting anything and says what to install; without the cert,
+`build-app.sh` falls back to ad-hoc signing and the grants keep dying on every rebuild.
 
 Safe to re-run: it exits early if the cert already exists, because a second leaf would change the
 designated requirement and break the grants it exists to preserve. It prints the `tccutil` lines to
@@ -368,9 +377,9 @@ Notes:
   tap under the hardened runtime). Verify at first notarization; add entitlements only if the runtime or
   `notarytool` log flags a specific denial.
 
-### CI / automated releases
+### CI and releases
 
-Three GitHub Actions workflows (`.github/workflows/`):
+Two GitHub Actions workflows (`.github/workflows/`):
 
 - **`preflight.yml`** runs `scripts/preflight.sh` on every push to `main` and every PR: version
   agreement across the five version homes plus the release-notes check. Deliberately has **no**
@@ -378,41 +387,14 @@ Three GitHub Actions workflows (`.github/workflows/`):
   exactly the paths `ci.yml` skips, so this workflow alone gates a docs-only or CHANGELOG-only PR.
 - **`ci.yml`**: on every push to `main` and every PR that touches something outside `docs/` and
   `**/*.md`, three jobs run. `app` compiles `Loudini.app` (ad-hoc signed) on a macOS runner, `test`
-  runs `scripts/test.sh` (the contract regression suite) on the same runner, and `plugin` typechecks +
-  builds the Stream Deck plugin on Linux. No secrets; fork PRs build safely because GitHub never
+  runs `scripts/test.sh` (the contract regression suite) on the same runner, and `plugin` typechecks,
+  tests (`pnpm test`, Node 24) and builds the Stream Deck plugin on Linux. No secrets; fork PRs build safely because GitHub never
   exposes secrets to them.
   (Developer-ID signing + notarization happen locally in `scripts/release.sh`, not here.)
-- **`release.yml`** is a **dormant manual cloud fallback** (`workflow_dispatch` only). Releases are cut
-  **locally** with `scripts/release.sh` (below); this workflow only runs when you trigger it from
-  Actions → release → Run workflow (e.g. to build the current version in the cloud). When triggered, a
-  cheap Linux `check` job reads `CFBundleShortVersionString`; if that version has no published release
-  yet (and isn't a downgrade), a macOS job imports your Developer ID cert into a throwaway keychain,
-  runs `scripts/package-dmg.sh` (notarizes via credentials in
-  `NOTARY_APPLE_ID`/`NOTARY_TEAM_ID`/`NOTARY_APP_PW`), and publishes the signed+notarized
-  `Loudini.dmg` as a GitHub Release tagged `vX.Y.Z`. The site's download button points at
-  `releases/latest/download/Loudini.dmg`, so it always resolves to the newest release.
+There is no cloud release workflow: releases are cut **locally** with `scripts/release.sh` (below),
+and no signing or notary secret is stored in GitHub (see DECISIONS.md, 2026-10-06).
 
-**One-time setup: five repository secrets** (Settings → Secrets and variables → Actions → New
-repository secret). **Only** the manual `release.yml` cloud fallback uses these. The local
-`scripts/release.sh` doesn't touch them (it signs with your keychain cert and notarizes via your
-`loudini` notarytool profile), so you can skip this entirely if you only ever release locally:
-
-```sh
-# 1. Export the Developer ID Application cert + private key to a .p12, then base64 it.
-#    (Keychain Access → your "Developer ID Application" cert → right-click → Export → .p12,
-#     set an export password; use that password as DEVELOPER_ID_CERT_PASSWORD below.)
-base64 -i DeveloperID.p12 | pbcopy      # paste as DEVELOPER_ID_CERT_P12
-```
-
-| Secret | Value |
-|---|---|
-| `DEVELOPER_ID_CERT_P12` | base64 of the exported `.p12` |
-| `DEVELOPER_ID_CERT_PASSWORD` | the password set during that export |
-| `APPLE_ID` | Apple ID email used for notarization |
-| `APPLE_TEAM_ID` | 10-char Developer Team ID (e.g. `24BDPF6PWJ`) |
-| `APPLE_APP_PASSWORD` | an app-specific password from appleid.apple.com |
-
-Cutting a release locally needs three things installed first: a **Developer ID Application** cert, the
+Cutting a release needs three things installed first: a **Developer ID Application** cert, the
 `loudini` notarytool keychain profile (both above), and the **GitHub CLI** (`gh`, authenticated with
 push access: `brew install gh && gh auth login`). `release.sh` publishes the Release through `gh` and
 aborts on its first call without one.
@@ -424,8 +406,7 @@ files that must agree (`menubar/Info.plist`, the plugin's `package.json` + Strea
 dated CHANGELOG skeleton. Fill that skeleton in. Preflight rejects the `TODO` placeholder, so a release
 can't publish it. Then commit, `git push origin main`, and run `scripts/release.sh`. It builds,
 notarizes, staples, and publishes the GitHub Release; re-running is safe (it bails if the version is
-already published). If you ever want a cloud build instead, trigger `release.yml` manually
-(Actions → release → Run workflow).
+already published).
 
 `scripts/preflight.sh` is the cheap gate behind that. Before `release.sh` builds anything it asserts the
 five versions agree, that this version's CHANGELOG section is actually written (an empty section or the
@@ -439,10 +420,11 @@ Tip: `SKIP_NOTARIZE=1 scripts/package-dmg.sh` builds and Developer-ID-signs the 
 Apple notary wait, which is handy for checking packaging/signing locally without waiting on Apple.
 
 Re-running after an aborted notary wait is cheap, within limits. `package-dmg.sh` reuses
-`menubar/Loudini.app` only when all three hold: it is this version, it is stapled, and no `.swift` file
-in `menubar/` or `helper/` is newer than the built binary. So a source fix made since the aborted run
-still forces a rebuild instead of quietly shipping the old binary (the log names the file that triggered
-it). Notary resume is **DMG-only**: `dist/.notary-state` maps a DMG's sha256 to its Apple submission id,
+`menubar/Loudini.app` only when all three hold: it is this version, it is stapled, and the sha256 of
+its build inputs (the `.swift`, `.plist`, `.icns`, `.png`, `.entitlements` and `.sh` files in
+`menubar/` and `helper/`, `build-app.sh` included) matches `dist/.app-inputs`. So any source change or
+deletion since the aborted run forces a rebuild instead of quietly shipping the old binary, logged as
+"build inputs changed". Notary resume is **DMG-only**: `dist/.notary-state` maps a DMG's sha256 to its Apple submission id,
 so an interrupted wait resumes that submission instead of re-uploading, and a rejected verdict drops the
 row again so the fixed re-run uploads fresh bytes rather than replaying the rejection. The app zip can
 never resume, because it is deleted on every exit and an unstapled app is rebuilt into different bytes,
@@ -455,10 +437,8 @@ review): `In Progress` → `Accepted` normally takes 2 to 15 min, so hours stuck
 Note the timestamps it prints are **UTC**.
 
 Notes:
-- The signing cert lives in your GitHub secrets, so anyone with push access to `main` (or who can edit
-  a workflow) can use your Developer ID identity. Keep collaborators trusted, or protect `main` and
-  require review on workflow changes. The identity is revocable at developer.apple.com if ever leaked.
-- The runner is Apple Silicon, so the DMG is `arm64`-only, same as a local `build-app.sh` build.
-  Intel support would need a universal (`lipo`'d) build; not wired up.
-- Hardening option: pin the `actions/*` and `pnpm/action-setup` steps to full commit SHAs instead of
-  `@v4` tags.
+- The signing cert stays in your login keychain and never goes to GitHub. The identity is revocable at
+  developer.apple.com if ever leaked.
+- The DMG is `arm64`-only, same as any `build-app.sh` build on Apple Silicon. Intel support would need
+  a universal (`lipo`'d) build; not wired up.
+- CI actions stay on `@v4` tags rather than commit SHAs, by decision (DECISIONS.md, 2026-10-06).

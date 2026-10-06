@@ -31,6 +31,14 @@ enum DDC {
 
     static var isSupported: Bool { create != nil && writeI2C != nil }
 
+    /// What a set or nudge did. writeFailed carries the last IOReturn when no
+    /// display accepted the write, so the CLI can say so instead of claiming success.
+    enum Outcome {
+        case applied(Int)
+        case noDisplay
+        case writeFailed(IOReturn)
+    }
+
     /// All external displays' AV services (empty on Intel / no external / no API).
     private static func services() -> [CFTypeRef] {
         guard let create else { return [] }
@@ -57,8 +65,8 @@ enum DDC {
     /// the marketed hotkey path) don't collapse steps or drive concurrent I2C to
     /// the same chip. Fail-open: proceed unlocked if the lock can't be taken.
     private static func withLock<T>(_ body: () -> T) -> T {
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o644)
+        try? ensureConfigDir()
+        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o600)
         guard fd >= 0 else { return body() }
         defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
         flock(fd, LOCK_EX)
@@ -72,8 +80,8 @@ enum DDC {
     /// the lock it's already moving brightness the same way, so skipping this
     /// step is correct and caps in-flight work at one. Fail-open on lock error.
     private static func tryWithLock<T>(_ body: () -> T) -> T? {
-        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o644)
+        try? ensureConfigDir()
+        let fd = open(configDir.appendingPathComponent("brightness.lock").path, O_CREAT | O_RDWR, 0o600)
         guard fd >= 0 else { return body() }   // can't open the lock → proceed unlocked
         defer { close(fd) }
         if flock(fd, LOCK_EX | LOCK_NB) != 0 { return nil }   // held → skip this redundant step
@@ -98,39 +106,43 @@ enum DDC {
         return cachedPercent() ?? 50
     }
 
-    /// Set 0-100 on every external display. Returns the applied value, or nil
-    /// when there is nothing to control.
-    @discardableResult
-    static func set(percent: Int) -> Int? { withLock { applyUnlocked(percent) } }
-    @discardableResult
-    private static func applyUnlocked(_ percent: Int) -> Int? {
+    /// Set 0-100 on every external display.
+    static func set(percent: Int) -> Outcome { withLock { applyUnlocked(percent) } }
+    private static func applyUnlocked(_ percent: Int) -> Outcome {
         let svcs = services()
-        guard !svcs.isEmpty else { return nil }
+        guard !svcs.isEmpty else { return .noDisplay }
         let pct = clampGain(percent)
+        var accepted = false
+        var lastError = IOReturn(KERN_SUCCESS)
         // 0-100 maps onto the monitor's own 0..max (usually 100).
         for av in svcs {
             var max = readLuminance(av)?.1 ?? 100
             if max <= 0 { max = 100 }  // a monitor replying max=0 would pin brightness to 0
-            writeLuminance(av, value: Int((Double(pct) / 100 * Double(max)).rounded()))
+            let r = writeLuminance(av, value: Int((Double(pct) / 100 * Double(max)).rounded()))
+            if r == KERN_SUCCESS { accepted = true } else { lastError = r }
             usleep(20_000)
         }
+        // Keep the cache on the last level a monitor actually took, so later steps don't jump.
+        guard accepted else { return .writeFailed(lastError) }
         // Cache the level so a menu open reflects it instantly. atomicWrite (ControlFile.swift)
         // creates ~/.config/loudini if the CLI runs first on a fresh machine, and writes via a
         // swept temp name + rename — the shared path every other ~/.config/loudini writer uses.
         try? atomicWrite(
             JSONSerialization.data(withJSONObject: ["percent": pct], options: [.sortedKeys]),
             to: cacheURL)
-        return pct
+        return .applied(pct)
     }
 
-    @discardableResult
-    static func nudge(_ delta: Int) -> Int? {
+    static func nudge(_ delta: Int) -> Outcome {
         // Whole read-modify-write under one NON-blocking lock. Base the step on
         // the cached last-set value (consistent under a held key), reading the
         // monitor only when there's no cache yet. If another invocation already
         // holds the lock, skip rather than queue a blocked process — return the
         // cached level so the caller still prints a sane value.
-        tryWithLock { applyUnlocked((cachedPercent() ?? currentUnlocked()) + delta) } ?? cachedPercent()
+        if let outcome = tryWithLock({ applyUnlocked((cachedPercent() ?? currentUnlocked()) + delta) }) {
+            return outcome
+        }
+        return cachedPercent().map { .applied($0) } ?? .noDisplay
     }
 
     // MARK: DDC/CI over I2C (chip 0x37, register 0x51)
@@ -152,11 +164,11 @@ enum DDC {
         return nil
     }
 
-    private static func writeLuminance(_ av: CFTypeRef, value: Int) {
-        guard let writeI2C else { return }
+    private static func writeLuminance(_ av: CFTypeRef, value: Int) -> IOReturn {
+        guard let writeI2C else { return IOReturn(KERN_FAILURE) }
         let v = UInt16(clamping: value)
         var data: [UInt8] = [0x84, 0x03, 0x10, UInt8(v >> 8), UInt8(v & 0xFF), 0]
         data[5] = 0x6E ^ 0x51 ^ data[0] ^ data[1] ^ data[2] ^ data[3] ^ data[4]
-        _ = data.withUnsafeMutableBytes { writeI2C(av, 0x37, 0x51, $0.baseAddress!, 6) }
+        return data.withUnsafeMutableBytes { writeI2C(av, 0x37, 0x51, $0.baseAddress!, 6) }
     }
 }

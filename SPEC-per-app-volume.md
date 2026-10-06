@@ -62,9 +62,9 @@ click sounds). To keep the list from twitching:
 - **Linger / debounce:** once an app appears, keep it for a short grace window (e.g. ~5 s, tunable)
   after `IsRunningOutput` goes false before removing it, so a paused track or inter-song gap doesn't
   make Spotify vanish and reappear.
-- **Sticky overrides:** any app the user has *set a non-100% volume for* stays listed while it's
-  running at all (even briefly idle), so their choice remains reachable; it only drops when the app
-  fully quits. Non-default per-app gains persist by bundle id across launches (see State).
+- **Sticky overrides (not implemented, by decision; see DECISIONS.md 2026-10-06):** rows drop after
+  the grace window whether or not the app has an override. Non-default per-app gains still persist by
+  bundle id across launches (see State) and apply the next time the app plays.
 - Exclude Loudini's own helper/app process objects (already excluded from the tap).
 
 Net: the picker shows a tight, live list — typically the 1–5 things actually making sound — which is
@@ -119,7 +119,10 @@ reports the default 100/false, never the requested override. `active` reflects `
   updates `control.json.apps[bundleID]` via the existing atomic-write helper (`ControlFile.swift`).
   Reuse `StatusWatcher.swift` to react to the roster.
 - **CLI** (`helper/loudini-helper.swift` subcommands): additive, master commands unchanged.
-  - `loudini apps` — list apps currently producing audio: `bundleID  name  gain  muted`.
+  - `loudini apps`: list apps currently producing audio, one tab-separated line each:
+    `<bundleID>\t<name>\tgain=<n>\tmuted=<bool>`, with `-` for an empty bundle id and a trailing
+    `  (idle)` while an app lingers in the grace window. An empty roster prints
+    `No apps are producing audio.`
   - `loudini app <bundleID|name> set <0-100> | mute | get` — set/toggle/read one app.
   - Name match is a convenience (fuzzy, case-insensitive over the live roster); bundle id is exact.
 - **Stream Deck** (`plugin/`): out of scope for v1; the contract additions leave room for a later

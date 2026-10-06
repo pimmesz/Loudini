@@ -48,8 +48,12 @@ import Darwin   // proc_name — name fallback for audio sources without a bundl
 
 private let logTimestamp = ISO8601DateFormatter()
 
-func log(_ msg: String) {
-    let line = "[\(logTimestamp.string(from: Date()))] \(msg)\n"
+enum LogLevel: String { case info = "INFO", error = "ERROR" }
+
+/// Up to three daemons (app, LaunchAgent, Stream Deck plugin) share daemon.log, so every
+/// line carries the pid to tie it to its process, and a level so failures can be grepped.
+func log(_ msg: String, _ level: LogLevel = .info) {
+    let line = "[\(logTimestamp.string(from: Date()))] [pid \(getpid())] \(level.rawValue) \(msg)\n"
     FileHandle.standardError.write(Data(line.utf8))
 }
 
@@ -99,7 +103,7 @@ struct Dev { let id: AudioObjectID; let uid: String; let name: String }
 
 func device(for id: AudioObjectID) -> Dev? {
     guard id != kAudioObjectUnknown, let uid = getString(id, kAudioDevicePropertyDeviceUID) else { return nil }
-    return Dev(id: id, uid: uid, name: getString(id, kAudioObjectPropertyName) ?? uid)
+    return Dev(id: id, uid: uid, name: sanitizeForOutput(getString(id, kAudioObjectPropertyName) ?? uid))
 }
 
 func deviceMatching(uid: String) -> Dev? {
@@ -143,18 +147,22 @@ func processObject(forPID pid: pid_t) -> AudioObjectID? {
 func statusData(_ c: Control, running: Bool, pipeline: Bool, device: String,
                 reason: String, apps: [AppEntry]) -> Data? {
     var obj: [String: Any] = ["gain": c.gain, "muted": c.muted, "running": running,
-                              "pipeline": pipeline, "device": device, "pid": Int(getpid())]
+                              "pipeline": pipeline, "device": device, "pid": Int(getpid()),
+                              "version": loudiniVersion, "exe": executablePath]
     if !reason.isEmpty { obj["reason"] = reason }
     obj["apps"] = apps.map(appEntryJSON)
     return try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
 }
+
+/// Where this binary runs from, so doctor can tell the app's daemon from a repo or plugin copy.
+let executablePath = Bundle.main.executablePath ?? CommandLine.arguments[0]
 
 func writeStatus(_ c: Control, running: Bool, pipeline: Bool, device: String,
                  reason: String, apps: [AppEntry]) {
     guard let data = statusData(c, running: running, pipeline: pipeline,
                                 device: device, reason: reason, apps: apps) else { return }
     do { try atomicWrite(data, to: statusURL) }
-    catch { log("status write failed: \(error.localizedDescription)") }
+    catch { log("status write failed: \(error.localizedDescription)", .error) }
 }
 
 // MARK: - tap -> aggregate -> gain pipeline
@@ -214,6 +222,9 @@ final class Pipeline {
     /// 64-bit store is atomic on arm64, so the render loop neither locks nor
     /// allocates for it. Wraps harmlessly: the watchdog only compares samples.
     private var heartbeatCount: UInt64 = 0
+    /// Callbacks whose input lacked a tap buffer, so they rendered silence while the
+    /// heartbeat still moved. Diagnostics only, read off the render thread.
+    private var incompleteCount: UInt64 = 0
 
     // Optional per-second metering (LOUDINI_METER=1), guarded by an unfair
     // lock that is only ever briefly held (proven dropout-free in the prototype).
@@ -250,7 +261,7 @@ final class Pipeline {
             var t = AudioObjectID(kAudioObjectUnknown)
             let e = AudioHardwareCreateProcessTap(d, &t)
             guard e == 0, t != kAudioObjectUnknown else {
-                log("per-app tap for \(sanitizeForOutput(spec.bundleID)) failed: \(fourCC(e)) — routing it through the master path (fail-open)")
+                log("per-app tap for \(sanitizeForOutput(spec.bundleID)) failed: \(fourCC(e)); routing it through the master path (fail-open)", .error)
                 continue
             }
             let slot = bundleIDsInOrder.count
@@ -277,7 +288,7 @@ final class Pipeline {
         } catch {
             guard !appTapIDs.isEmpty else { freeAppGains(); throw error }
             log("aggregate/IOProc build failed with \(appTapIDs.count) per-app tap(s): "
-                + "\(error.localizedDescription) — dropping them to the master path and retrying global-only (fail-open)")
+                + "\(error.localizedDescription); dropping them to the master path and retrying global-only (fail-open)", .error)
             for t in appTapIDs { AudioHardwareDestroyProcessTap(t) }
             appTapIDs = []
             bundleIDsInOrder = []
@@ -363,6 +374,7 @@ final class Pipeline {
             // global tap, then the per-app taps we built. So the tap buffers are
             // the final `tapCount` buffers; the app taps follow the global one.
             let nIn = inList.count
+            if nIn < tapCount { self.incompleteCount = self.incompleteCount &+ 1 }
             guard nIn >= tapCount, outList.count > 0 else { return }
             let base = nIn - tapCount                // index of the global tap buffer
             let ob = outList[0]
@@ -494,6 +506,7 @@ final class Pipeline {
     /// Current render heartbeat. Monotonic for the life of this pipeline, so
     /// "unchanged since the last sample" means no IO callback ran in between.
     func heartbeat() -> UInt64 { heartbeatCount }
+    func incompleteCallbacks() -> UInt64 { incompleteCount }
 
     /// (rms in, rms out, callbacks) since last call, then resets.
     func drainMeter() -> (Double, Double, UInt64) {
@@ -595,8 +608,9 @@ final class AppRoster {
             self.listListener = { [weak self] _, _ in
                 self?.queue.async { self?.resubscribeAndRefresh() }
             }
-            _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                    &self.listAddr, self.queue, self.listListener)
+            let st = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                         &self.listAddr, self.queue, self.listListener)
+            if st != 0 { log("process-list listener registration failed (\(fourCC(st))): the app roster won't update", .error) }
             self.resubscribeAndRefresh()
 
             let t = DispatchSource.makeTimerSource(queue: self.queue)
@@ -786,6 +800,15 @@ final class Engine {
     /// Why the pipeline is down: "" (it's up), "no-device", or the error text.
     private var lastReason = ""
     private var meterTimer: DispatchSourceTimer?
+    /// The retry loop runs every 2 s while the pipeline cannot build. Its failure is
+    /// logged once, again when the text changes, then as a periodic summary.
+    private var retryFailure: (text: String, since: Date, attempts: Int, lastLogged: TimeInterval)?
+    private static let retrySummaryInterval: TimeInterval = 300.0
+    /// Remembered master level per fixed-level output (DeviceLevels.swift), and the output
+    /// the last build targeted. Nil until the first build, so a daemon start restores nothing.
+    private var deviceLevels = readDeviceLevels()
+    private var lastTargetUID: String?
+    private var lastTargetIsFixed = false
 
     // Render-stall watchdog. The aggregate can stop calling our IOProc without
     // the HAL firing any of the listeners we have (the classic aggregate glitch
@@ -796,6 +819,12 @@ final class Engine {
     /// When the heartbeat last moved (or was last deliberately re-armed), on the
     /// uptime clock. Set for real on every successful build.
     private var lastHeartbeatMove: TimeInterval = 0
+    /// Wall and uptime clocks at the previous watchdog sample, to notice that the Mac
+    /// slept in between, and the uptime until which stall checks stay paused after it.
+    private var lastSampleWall = Date().timeIntervalSince1970
+    private var lastSampleUptime: TimeInterval = 0
+    private var stallPausedUntil: TimeInterval = 0
+    private static let afterSleepPause: TimeInterval = 90.0
     /// Uptime at which the last stall-triggered rebuild is (or was) due to run,
     /// for the cooldown below.
     private var lastStallRebuild: TimeInterval?
@@ -888,16 +917,18 @@ final class Engine {
             }
             volumeListener = { [weak self] _, _ in self?.onExternalVolume() }
             if overrideUID == nil {
-                _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                        &defaultOutAddr, queue, systemListener)
+                let st = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                             &defaultOutAddr, queue, systemListener)
+                if st != 0 { log("default-output listener registration failed (\(fourCC(st))): output switches won't be followed", .error) }
             }
 
             // Watch the process-object list so an overridden app launching or
             // quitting re-forms (or drops) its per-app tap. Cheap: it only
             // rebuilds when the tapped-process SET actually changes.
             procListListener = { [weak self] _, _ in self?.reconcileAppTaps() }
-            _ = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
-                                                    &procListAddr, queue, procListListener)
+            let procSt = AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                             &procListAddr, queue, procListListener)
+            if procSt != 0 { log("process-list listener registration failed (\(fourCC(procSt))): per-app taps won't follow app launches", .error) }
 
             rebuildLocked(reason: "startup")
 
@@ -943,6 +974,7 @@ final class Engine {
         queue.async { [self] in
             guard !isShutdown, newControl != control else { return }
             let gainChanged = newControl.gain != control.gain
+            let appKeysChanged = Set(newControl.apps.keys) != Set(control.apps.keys)
             control = newControl
             pipeline?.gain = softwareGain(newControl)
             // On a device that owns its volume, the master IS the device scalar:
@@ -960,9 +992,10 @@ final class Engine {
             // Per-app: rebuild only if the tapped-process SET changed (a bundle
             // gained/lost an override, or its process set changed). A pure gain
             // change reuses the existing taps — a lock-free float store, no HAL
-            // churn, no render glitch.
+            // churn, no render glitch. The process-list scan only runs when the
+            // override keys changed; launches and quits go through reconcileAppTaps.
             if pipeline != nil {
-                if appTapSig(desiredAppTaps()) != currentAppTapSig {
+                if appKeysChanged, appTapSig(desiredAppTaps()) != currentAppTapSig {
                     scheduleRebuild(reason: "per-app override set changed")
                 } else {
                     for (bid, slot) in builtBundleIndex {
@@ -1027,6 +1060,11 @@ final class Engine {
             }
             pipeline?.destroy()
             pipeline = nil
+            // Keep the current fixed-level output's level for next time.
+            if let uid = lastTargetUID, lastTargetIsFixed, deviceLevels[uid] != control.gain {
+                deviceLevels[uid] = control.gain
+                saveDeviceLevels()
+            }
             writeStatus(control, running: false, pipeline: false,
                         device: currentDevice?.name ?? "", reason: "", apps: [])
             log("shutdown: tap + aggregate destroyed, direct audio path restored")
@@ -1056,26 +1094,40 @@ final class Engine {
     /// acts on a pipeline that has gone completely quiet for the whole stall
     /// window with at least one app actively producing output the whole time.
     private func checkRenderStall() {
-        guard !isShutdown, let p = pipeline, p.started else { return }
+        guard !isShutdown else { return }
 
+        // Sample the clocks even while the pipeline is down, so a sleep in that time
+        // still pauses the checks for the next pipeline.
         let now = uptimeNow()
+        let wall = Date().timeIntervalSince1970
+        let slept = sleptSeconds(wallDelta: wall - lastSampleWall, uptimeDelta: now - lastSampleUptime)
+        lastSampleWall = wall
+        lastSampleUptime = now
+        if slept > 0 {
+            stallPausedUntil = now + Self.afterSleepPause
+            log("woke after \(Int(slept))s asleep: stall checks paused for \(Int(Self.afterSleepPause))s")
+        }
+
+        guard let p = pipeline, p.started else { return }
         let ticks = p.heartbeat()
-        if ticks != lastHeartbeat {
+        // Nothing playing means no callbacks are expected, so an idle stretch never counts.
+        // A build that never rendered gets the longer window but is never exempt: a live
+        // tap whose IOProc never fires is silence with the daemon reporting healthy.
+        let verdict = stallVerdict(ticks: ticks, lastTicks: lastHeartbeat, quietSince: lastHeartbeatMove,
+                                   now: now, anyAppActive: currentApps.contains(where: { $0.active }),
+                                   pausedUntil: stallPausedUntil,
+                                   steadyWindow: Self.stallWindow, startupWindow: Self.startupStallWindow)
+        let window: TimeInterval
+        switch verdict {
+        case .progressing:
             lastHeartbeat = ticks
             lastHeartbeatMove = now
             return
-        }
-        // Nothing playing ⇒ no callbacks expected; an idle stretch must never
-        // count toward the stall window.
-        guard currentApps.contains(where: { $0.active }) else {
-            lastHeartbeatMove = now
+        case .waiting:
             return
+        case .stalled(let w):
+            window = w
         }
-        // A build that has never rendered gets the longer window, but is never
-        // exempt: a live tap whose IOProc never fires is total silence with the
-        // daemon reporting healthy — the exact failure this watchdog exists for.
-        let window = ticks == 0 ? Self.startupStallWindow : Self.stallWindow
-        guard now - lastHeartbeatMove >= window else { return }
         lastHeartbeatMove = now
 
         // Destroying the taps IS the fix: muteBehavior is .mutedWhenTapped, so
@@ -1084,7 +1136,7 @@ final class Engine {
         let what = ticks == 0 ? "never produced an IO callback in \(Int(window))s"
                               : "no IO callback for \(Int(window))s"
         log("render stalled: \(what) while apps are producing output "
-            + "— destroying the tap, audio returns to the direct path (fail-open)")
+            + "(destroying the tap, audio returns to the direct path, fail-open)", .error)
         pipeline?.destroy()
         pipeline = nil
         // No pipeline ⇒ no per-app tap applied, same as rebuildLocked.
@@ -1096,10 +1148,8 @@ final class Engine {
         // back while it is nil (reconcileAppTaps and apply(control:) both no-op
         // then), and on a device with no volume scalar of its own that would
         // leave the user with no volume control at all.
-        var delay = Self.stallRebuildDelay
-        if let last = lastStallRebuild {
-            delay = max(delay, last + Self.stallRebuildCooldown - now)
-        }
+        let delay = stallRebuildWait(lastRebuild: lastStallRebuild, now: now,
+                                     grace: Self.stallRebuildDelay, cooldown: Self.stallRebuildCooldown)
         lastStallRebuild = now + delay
         if delay > Self.stallRebuildDelay {
             log("a stall rebuild ran less than \(Int(Self.stallRebuildCooldown))s ago — "
@@ -1131,7 +1181,7 @@ final class Engine {
         // Advance the echo guard only on success — a failed set leaves the
         // device at its old level (a no-op volume change, never full blast).
         guard AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v) == 0 else {
-            log("device volume set failed (scalar \(v)) — level unchanged this cycle")
+            log("device volume set failed (scalar \(v)); level unchanged this cycle", .error)
             return false
         }
         lastAppliedScalar = v
@@ -1170,6 +1220,24 @@ final class Engine {
         log("device volume changed externally (e.g. Touch Bar) -> gain=\(g)")
     }
 
+    private func saveDeviceLevels() {
+        do { try writeDeviceLevels(deviceLevels) }
+        catch { log("devices.json write failed: \(error.localizedDescription)", .error) }
+    }
+
+    private func logRebuildFailure(reason: String, _ text: String) {
+        let now = uptimeNow()
+        guard let f = retryFailure, f.text == text else {
+            retryFailure = (text: text, since: Date(), attempts: 1, lastLogged: now)
+            log("rebuild(\(reason)): \(text)", .error)
+            return
+        }
+        retryFailure?.attempts += 1
+        guard now - f.lastLogged >= Self.retrySummaryInterval else { return }
+        retryFailure?.lastLogged = now
+        log("still failing after \(f.attempts + 1) attempts since \(logTimestamp.string(from: f.since)): \(text)", .error)
+    }
+
     private func rebuildLocked(reason: String) {
         guard !isShutdown else { return }
         removeDeviceListeners()
@@ -1183,10 +1251,10 @@ final class Engine {
         let target: Dev?
         if let uid = overrideUID {
             target = deviceMatching(uid: uid)
-            if target == nil { log("rebuild(\(reason)): no device with UID '\(uid)' present") }
+            if target == nil { logRebuildFailure(reason: reason, "the --device override is not present, retrying in 2s") }
         } else {
             target = defaultOutputDevice()
-            if target == nil { log("rebuild(\(reason)): no default output device") }
+            if target == nil { logRebuildFailure(reason: reason, "no default output device, retrying in 2s") }
         }
         guard let dev = target else {
             currentDevice = nil
@@ -1197,7 +1265,7 @@ final class Engine {
         }
 
         guard let selfProc = processObject(forPID: getpid()) else {
-            log("rebuild(\(reason)): cannot resolve own HAL process object yet, retrying in 2s")
+            logRebuildFailure(reason: reason, "cannot resolve own HAL process object yet, retrying in 2s")
             // The old pipeline is already destroyed — publish that truthfully,
             // or status.json keeps claiming pipeline:true through the retries.
             currentDevice = nil
@@ -1211,6 +1279,24 @@ final class Engine {
         // are required — otherwise fall back to software gain as master (safe).
         // The device level is adopted AFTER the listener is live (below).
         masterViaScalar = deviceHasSettableVolume(dev.id) && readScalar(dev.id) != nil
+
+        // Remember the level the outgoing fixed-level output was at and bring back the
+        // incoming one's. Done before the build, so the pipeline never starts at the level
+        // inherited from the previous output (on a DAC that errs loud).
+        let plan = planDeviceSwitch(previousUID: lastTargetUID, previousIsFixed: lastTargetIsFixed,
+                                    newUID: dev.uid, newIsFixed: !masterViaScalar,
+                                    currentGain: control.gain, levels: deviceLevels)
+        lastTargetUID = dev.uid
+        lastTargetIsFixed = !masterViaScalar
+        if plan.levels != deviceLevels {
+            deviceLevels = plan.levels
+            saveDeviceLevels()
+        }
+        if let g = plan.applyGain {
+            control.gain = g
+            publishGain(g)
+            log("restored this output's last level: gain=\(g)")
+        }
 
         let desired = desiredAppTaps()
         let specs = desired.map { AppTapSpec(bundleID: $0.bundleID, procs: $0.procs,
@@ -1248,7 +1334,7 @@ final class Engine {
                 // open to, so rethrow into the retry loop (audio stays direct).
                 guard !specs.isEmpty else { throw error }
                 log("per-app pipeline failed to start: \(error.localizedDescription) — "
-                    + "dropping all per-app taps to the master path and rebuilding global-only (fail-open)")
+                    + "dropping all per-app taps to the master path and rebuilding global-only (fail-open)", .error)
                 p = try buildAndStart([])
             }
             pipeline = p
@@ -1282,14 +1368,18 @@ final class Engine {
                 : "per-app taps: \(p.bundleIDsInOrder.map(sanitizeForOutput).joined(separator: ", "))"
             let dropped = desired.count - p.bundleIDsInOrder.count
             let droppedNote = dropped > 0 ? " (\(dropped) fell open to master path)" : ""
-            log("pipeline live (\(reason)): global tap [excl. pid \(getpid())] -> master \(control.multiplier) -> \(dev.name) [\(dev.uid)]; \(appNote)\(droppedNote)")
+            if let f = retryFailure {
+                log("recovered after \(f.attempts) failed attempts since \(logTimestamp.string(from: f.since))")
+                retryFailure = nil
+            }
+            log("pipeline live (\(reason)): global tap -> master \(control.multiplier) -> \(dev.name); \(appNote)\(droppedNote)")
             scheduleShapeLog(for: p)
             // If we adopted the device's own volume, sync control.json so every
             // frontend shows that level (our watcher re-applying it is a no-op).
             if masterViaScalar { publishGain(control.gain) }
             publishStatus()
         } catch {
-            log("rebuild(\(reason)) failed: \(error.localizedDescription) — audio untouched (fail-open), retrying in 2s")
+            logRebuildFailure(reason: reason, "failed: \(error.localizedDescription); audio untouched (fail-open), retrying in 2s")
             currentDevice = nil
             lastReason = error.localizedDescription
             publishStatus()
@@ -1304,20 +1394,26 @@ final class Engine {
         queue.asyncAfter(deadline: .now() + 2) { [weak self, weak p] in
             guard let self, let p, p === self.pipeline else { return }
             if let shape = p.shapeDescription() {
-                log("first IO callback: \(shape)")
+                log("first IO callback: \(shape) (after \(p.incompleteCallbacks()) incomplete)")
             } else if attempt < 30 {
                 self.scheduleShapeLog(for: p, attempt: attempt + 1)
+            } else {
+                log("no complete IO callback in 60s: callbacks=\(p.heartbeat()) incomplete=\(p.incompleteCallbacks())", .error)
             }
         }
     }
 
     private func addDeviceListeners(_ dev: AudioObjectID) {
         deviceListenerTarget = dev
-        _ = AudioObjectAddPropertyListenerBlock(dev, &rateAddr, queue, deviceListener)
-        _ = AudioObjectAddPropertyListenerBlock(dev, &aliveAddr, queue, deviceListener)
+        let rateSt = AudioObjectAddPropertyListenerBlock(dev, &rateAddr, queue, deviceListener)
+        let aliveSt = AudioObjectAddPropertyListenerBlock(dev, &aliveAddr, queue, deviceListener)
+        if rateSt != 0 || aliveSt != 0 {
+            log("device listener registration failed (rate \(fourCC(rateSt)), alive \(fourCC(aliveSt))): "
+                + "rate or removal changes won't rebuild", .error)
+        }
         if masterViaScalar {
             let st = AudioObjectAddPropertyListenerBlock(dev, &volumeAddr, queue, volumeListener)
-            if st != 0 { log("volume listener registration failed (\(fourCC(st))) — external volume changes won't mirror") }
+            if st != 0 { log("volume listener registration failed (\(fourCC(st))): external volume changes won't mirror", .error) }
         }
     }
 
@@ -1359,7 +1455,7 @@ final class Engine {
         do {
             try atomicWrite(data, to: statusURL)
             lastStatusData = data
-        } catch { log("status write failed: \(error.localizedDescription)") }
+        } catch { log("status write failed: \(error.localizedDescription)", .error) }
     }
 }
 
@@ -1397,7 +1493,7 @@ final class ControlWatcher {
         guard let c = readControl(previous: lastGood) else {
             if !warnedBadFile {
                 warnedBadFile = true
-                log("control.json unreadable/malformed — keeping gain=\(lastGood.gain) muted=\(lastGood.muted)")
+                log("control.json unreadable/malformed, keeping gain=\(lastGood.gain) muted=\(lastGood.muted)", .error)
             }
             return
         }
@@ -1421,7 +1517,8 @@ usage: loudini-helper [--device <UID>]   run the gain daemon (default: current o
        loudini-helper apps reset         reset every per-app volume to 100% (clears overrides)
        loudini-helper app <id|name> set <0-100> | mute | get
                                          set/toggle/read one app's volume (bundle id exact, name fuzzy)
-       loudini-helper doctor             diagnose the whole setup, with fixes
+       loudini-helper doctor             diagnose the daemon, audio-capture permission, launchd and conflicts
+       loudini-helper --version          print the build version
        loudini-helper brightness up|down [step] | set <0-100> | get
                                          external-monitor brightness over DDC (no permission needed)
 """
@@ -1449,6 +1546,9 @@ enum LoudiniHelper {
             runDoctor()
         case "brightness":
             runBrightness(Array(args.dropFirst()))
+        case "--version":
+            print("loudini \(loudiniVersion)")
+            exit(0)
         default:
             runDaemon(args)
         }
@@ -1458,35 +1558,12 @@ enum LoudiniHelper {
     // They never touch Core Audio; the running daemon applies the change on
     // its next 100 ms poll.
 
-    /// Resolve a user-typed `app` target to a bundle id. Bundle id is exact
-    /// (and usable even when the app isn't in the roster — you can pre-set a
-    /// silent app); a name is matched case-insensitively over the live roster
-    /// (exact name, then substring, then bundle-id substring). Falls back to
-    /// treating a dotted token as a bundle id so a not-yet-playing app is still
-    /// addressable. nil when nothing plausibly matches. Roster hits with an
-    /// empty bundle id (bundle-less sources like raw CLI/helper audio) are
-    /// skipped — there's no stable key to write, so set/mute would silently
-    /// no-op on "".
-    private static func resolveAppTarget(_ token: String, _ roster: [AppEntry]) -> String? {
-        // Reject the empty token up front. Without this, the fuzzy `.contains(lower)`
-        // passes below match every entry (`"x".contains("") == true`), so `app "" set`
-        // would silently address the first roster app instead of failing.
-        guard !token.isEmpty else { return nil }
-        if roster.contains(where: { $0.bundleID == token }) { return token }
-        let lower = token.lowercased()
-        // Every fuzzy pass skips bundle-less sources *inside* the predicate so it
-        // keeps scanning to a later addressable match instead of stopping on the
-        // first name/id hit and then failing the guard.
-        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.name.lowercased() == lower }) {
-            return hit.bundleID
-        }
-        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.name.lowercased().contains(lower) }) {
-            return hit.bundleID
-        }
-        if let hit = roster.first(where: { !$0.bundleID.isEmpty && $0.bundleID.lowercased().contains(lower) }) {
-            return hit.bundleID
-        }
-        return token.contains(".") ? token : nil
+    /// The volume verbs only write control.json; without a live daemon nothing applies it.
+    /// Warn on stderr but keep exit 0, because the change is saved and applies on next start.
+    private static func warnIfNoDaemon() {
+        guard readStatus()?.running != true else { return }
+        FileHandle.standardError.write(Data(
+            "warning: no Loudini daemon running, change saved but not applied (run `loudini doctor`)\n".utf8))
     }
 
     private static func runCLI(_ args: [String]) -> Never {
@@ -1498,16 +1575,19 @@ enum LoudiniHelper {
                 if args.count == 2 {
                     // 0-100 only: gain saturates there anyway, and a sane range
                     // means the negation below can never overflow.
-                    guard let s = Int(args[1]), (0...100).contains(s) else { usage() }
+                    guard let s = parsePercent(args[1]) else { usage() }
                     step = s
                 }
                 try ControlOps.nudge(args[0] == "up" ? step : -step)
+                warnIfNoDaemon()
             case "mute":
                 guard args.count == 1 else { usage() }
                 try ControlOps.toggleMute()
+                warnIfNoDaemon()
             case "set":
                 guard args.count == 2, let g = Int(args[1]) else { usage() }
                 try ControlOps.set(gain: g)
+                warnIfNoDaemon()
             case "get":
                 guard args.count == 1 else { usage() }
                 if let s = readStatus() {
@@ -1523,6 +1603,7 @@ enum LoudiniHelper {
                 if args.count == 2, args[1] == "reset" {
                     try ControlOps.resetApps()
                     print("reset all per-app volumes to 100%")
+                    warnIfNoDaemon()
                     break
                 }
                 guard args.count == 1 else { usage() }
@@ -1549,13 +1630,15 @@ enum LoudiniHelper {
                 }
                 switch args[2] {
                 case "set":
-                    guard args.count == 4, let g = Int(args[3]), (0...100).contains(g) else { usage() }
+                    guard args.count == 4, let g = parsePercent(args[3]) else { usage() }
                     try ControlOps.setApp(bid, gain: g)
                     print("\(sanitizeForOutput(bid)) gain=\(g)")
+                    warnIfNoDaemon()
                 case "mute":
                     guard args.count == 3 else { usage() }
                     let c = try ControlOps.toggleAppMute(bid)
                     print("\(sanitizeForOutput(bid)) muted=\(c.apps[bid]?.muted ?? false)")
+                    warnIfNoDaemon()
                 case "get":
                     guard args.count == 3 else { usage() }
                     // Prefer the daemon's applied values (what's actually audible);
@@ -1588,28 +1671,34 @@ enum LoudiniHelper {
         }
         func step(_ rest: [String]) -> Int {
             guard let s = rest.first else { return 6 }
-            guard let n = Int(s), (0...100).contains(n) else { usage() }
+            guard let n = parsePercent(s) else { usage() }
             return n
         }
-        let applied: Int?
+        let outcome: DDC.Outcome
         switch args.first {
-        case "up":   applied = DDC.nudge(step(Array(args.dropFirst())))
-        case "down": applied = DDC.nudge(-step(Array(args.dropFirst())))
+        case "up":   outcome = DDC.nudge(step(Array(args.dropFirst())))
+        case "down": outcome = DDC.nudge(-step(Array(args.dropFirst())))
         case "set":
             guard args.count == 2, let n = Int(args[1]) else { usage() }
-            applied = DDC.set(percent: n)
+            outcome = DDC.set(percent: n)
         case "get":
             print("brightness=\(DDC.current())")
             exit(0)
         default:
             usage()
         }
-        guard let applied else {
+        switch outcome {
+        case .applied(let level):
+            print("brightness=\(level)")
+            exit(0)
+        case .noDisplay:
             FileHandle.standardError.write(Data("brightness: no external DDC display connected\n".utf8))
             exit(1)
+        case .writeFailed(let code):
+            let hex = String(format: "0x%08x", UInt32(bitPattern: code))
+            FileHandle.standardError.write(Data("brightness: DDC write failed (\(hex)), level unchanged\n".utf8))
+            exit(1)
         }
-        print("brightness=\(applied)")
-        exit(0)
     }
 
     // MARK: doctor — diagnose the whole setup and print concrete fixes.
@@ -1689,10 +1778,22 @@ enum LoudiniHelper {
         if daemonAlive {
             pass("daemon running (daemon.lock is held)")
         } else {
-            fail("no daemon running — volume changes do nothing",
-                 fix: "open the Loudini menu-bar app, or scripts/install-daemon.sh")
+            fail("no daemon running: volume changes do nothing",
+                 fix: "open the Loudini app (or, for a build from source, scripts/install-daemon.sh)")
         }
         if let s = readStatus() {
+            if daemonAlive, s.running {
+                // A stale repo or plugin build can win daemon.lock over the app's own daemon.
+                if s.version.isEmpty {
+                    warn("the running daemon predates version reporting (an old build)",
+                         fix: "quit and reopen Loudini so its bundled daemon takes over")
+                } else if s.version != loudiniVersion {
+                    warn("daemon is \(s.version) at \(s.exe), this CLI is \(loudiniVersion)",
+                         fix: "quit every other Loudini copy (LaunchAgent, Stream Deck plugin), then reopen Loudini")
+                } else {
+                    pass("daemon \(s.version) at \(s.exe)")
+                }
+            }
             if daemonAlive {
                 if !s.running {
                     warn("daemon.lock held but status.json says running=false — daemon may be mid-start; re-run doctor")
@@ -1709,8 +1810,9 @@ enum LoudiniHelper {
                 } else {
                     let detail = s.reason.isEmpty ? "" : " (daemon reports: \(s.reason))"
                     fail("daemon running but NO audio pipeline — likely missing System Audio Recording permission\(detail)",
-                         fix: "System Settings -> Privacy & Security -> Screen & System Audio Recording: "
-                            + "enable the app that runs the daemon; details in ~/.config/loudini/daemon.log")
+                         fix: "System Settings > Privacy & Security > Screen & System Audio Recording: turn on "
+                            + "Loudini (or the app that started the daemon, such as Stream Deck); "
+                            + "details in ~/.config/loudini/daemon.log")
                 }
             } else if s.running {
                 warn("stale status.json (claims running, but no daemon holds the lock — a daemon was killed hard)")
@@ -1760,6 +1862,10 @@ enum LoudiniHelper {
             warn(Conflicts.problem(for: rival), fix: Conflicts.fixHint(for: rival))
         }
 
+        print("keys:")
+        note("volume-key and brightness-key permissions are not checked here. Open the Loudini menu: "
+             + "it shows a fix row if one is missing.")
+
         print(failures == 0 ? "\nAll good." : "\n\(failures) problem(s) found.")
         exit(failures == 0 ? 0 : 1)
     }
@@ -1784,9 +1890,12 @@ enum LoudiniHelper {
         }
 
         do {
-            try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+            try ensureConfigDir()
+            // Tighten installs made before the config dir was private (no-op once done).
+            chmod(configDir.path, 0o700)
+            chmod(configDir.appendingPathComponent("daemon.log").path, 0o600)
         } catch {
-            log("FATAL: cannot create \(configDir.path): \(error.localizedDescription)")
+            log("FATAL: cannot create \(configDir.path): \(error.localizedDescription)", .error)
             exit(1)
         }
 
@@ -1794,10 +1903,24 @@ enum LoudiniHelper {
         // apply gain. The kernel drops the flock on ANY death, so this can
         // never wedge (fail-open extends to the lock itself).
         let lockFD = open(configDir.appendingPathComponent("daemon.lock").path,
-                          O_CREAT | O_RDWR, 0o644)
+                          O_CREAT | O_RDWR, 0o600)
         if lockFD < 0 || flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
-            log("another loudini-helper daemon is already running — exiting (single-instance)")
-            exit(0)
+            // Someone at a terminal gets an answer straight away. A daemon started by
+            // launchd, the app or the Stream Deck plugin waits instead, before touching
+            // any audio, and takes over when the running one exits: no 10 s relaunch
+            // loop under KeepAlive, and no log line per plugin key press.
+            guard lockFD >= 0, isatty(STDIN_FILENO) == 0 else {
+                log("another loudini-helper daemon is already running, exiting (single-instance; \(loudiniVersion) exe=\(executablePath))")
+                exit(0)
+            }
+            log("another loudini-helper daemon is running; waiting to take over (\(loudiniVersion) exe=\(executablePath))")
+            while flock(lockFD, LOCK_EX) != 0 {
+                guard errno == EINTR else {
+                    log("cannot wait for daemon.lock (\(String(cString: strerror(errno)))), exiting", .error)
+                    exit(1)
+                }
+            }
+            log("took over daemon.lock")
         }
 
         sweepStaleTempFiles()
@@ -1829,7 +1952,7 @@ enum LoudiniHelper {
             signalSources.append(src)
         }
 
-        log("loudini-helper started (pid \(getpid()))\(overrideUID.map { " device override \($0)" } ?? "")")
+        log("loudini-helper \(loudiniVersion) started (ppid \(getppid()) exe=\(executablePath))\(overrideUID == nil ? "" : ", device override set")")
         dispatchMain()
     }
 
@@ -1841,7 +1964,7 @@ enum LoudiniHelper {
         guard let names = try? fm.contentsOfDirectory(atPath: configDir.path) else { return }
         for name in names
         where (name.hasPrefix(".control.json.") || name.hasPrefix(".status.json.")
-               || name.hasPrefix(".brightness.json."))
+               || name.hasPrefix(".brightness.json.") || name.hasPrefix(".devices.json."))
             && name.hasSuffix(".tmp") {
             let url = configDir.appendingPathComponent(name)
             guard let attrs = try? fm.attributesOfItem(atPath: url.path),
