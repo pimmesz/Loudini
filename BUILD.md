@@ -72,9 +72,11 @@ atomic-write helper, and both the LaunchAgent and the Stream Deck plugin ship th
   list, frameworks, and the `-target` that pins the macOS 14.4 floor); building it by hand risks
   omitting a file. Until it exists, `scripts/install-cli.sh` and `scripts/install-daemon.sh` exit 1
   and `plugin/build.mjs` warns.
-- `plugin/src/control.ts`: the TS side of the contract. Exports `readControl()`/`writeControl(c)`/
-  `readStatus()`/`nudge(delta)`/`toggleMute()`. Mirror this behavior in the Swift CLI so both frontends
-  agree exactly (clamp 0-100; `nudge`/`up`/`down` also **un-mutes**).
+- `helper/ControlFile.swift`: the contract's reference implementation (`readControl`/`writeControl`,
+  `ControlOps` with `nudge`/`toggleMute`/`set`, `withControlLock`; clamp 0-100, `up`/`down` also
+  **un-mute**). `plugin/src/control.ts` only reads `status.json` (`readStatus()`, parsed the way Swift
+  does); key presses go through `runVerb()` in `plugin/src/helper.ts`, which runs the bundled CLI so
+  every write takes `control.lock`.
 - `plugin/src/actions.ts`, `plugin/src/helper.ts`: the Stream Deck frontend (Phase 3).
 - `plugin/gg.pim.loudini.sdPlugin/manifest.json`: Elgato manifest, `UUID gg.pim.loudini`.
 
@@ -399,7 +401,8 @@ Cutting a release needs three things installed first: a **Developer ID Applicati
 push access: `brew install gh && gh auth login`). `release.sh` publishes the Release through `gh` and
 aborts on its first call without one.
 
-Cut a release (locally, from your Mac): run `scripts/bump-version.sh 0.3.0`. The version lives in five
+Cut a release (locally, from your Mac): run `scripts/bump-version.sh <N.N.N>`, a version higher than
+the latest release. The version lives in five
 files that must agree (`menubar/Info.plist`, the plugin's `package.json` + Stream Deck manifest, the
 `docs/index.html` footer, and a `CHANGELOG.md` heading); the script backs up all five to a temp dir
 (printed before it rewrites anything, so a half-done bump is still recoverable), writes them, and adds a

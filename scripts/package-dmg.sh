@@ -299,4 +299,8 @@ else
 fi
 log "✅ done in $(( (SECONDS - _t0) / 60 ))m — ${dmg}"
 echo
-echo "Publish it:  gh release create v${version} \"${dmg}\" --title \"Loudini v${version}\" --notes \"…\""
+if [ -n "${SKIP_NOTARIZE:-}" ]; then
+  echo "Not notarized: do not publish this DMG."
+else
+  echo "Publish it with scripts/release.sh (the only release path; it re-checks main, the tag and notarization)."
+fi

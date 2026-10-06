@@ -39,7 +39,7 @@ export function ensureHelper(log: Log): void {
   // or a crashed helper would never be respawned.
   if (child && child.exitCode === null && child.signalCode === null) return; // still alive
   if (!existsSync(HELPER)) {
-    log.error(`Loudini: helper binary missing at ${HELPER}; build it with menubar/build-app.sh first.`);
+    log.error(`Loudini: helper binary missing at ${HELPER}; build the daemon with menubar/build-app.sh, then re-run \`pnpm build\` in plugin/ so it is bundled.`);
     return;
   }
   const out = openDaemonLog(log);

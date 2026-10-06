@@ -28,10 +28,10 @@ off with **Check for Updates Automatically** in the menu.
 ## Build from source
 
 Requires macOS 14.4+ and the Xcode Command Line Tools (`xcode-select --install`), because
-`build-app.sh` uses `swiftc` and `codesign`. `scripts/make-dev-cert.sh` needs Homebrew's OpenSSL 3
+`build-app.sh` uses `swiftc`, `codesign` and `python3` (all three come with them). `scripts/make-dev-cert.sh` needs Homebrew's OpenSSL 3
 installed (`brew install openssl@3`, no `PATH` change needed), because macOS ships LibreSSL, which has
 no `-legacy` flag. The
-release scripts also need `python3` and the GitHub CLI (`gh`, authenticated with push access:
+release scripts also need the GitHub CLI (`gh`, authenticated with push access:
 `brew install gh && gh auth login`).
 
 ```sh

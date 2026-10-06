@@ -50,7 +50,7 @@ tags="$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq '.[]
 
 # Already published this version? Nothing to do.
 if printf '%s\n' "${tags}" | grep -qxF "v${version}"; then
-  echo "v${version} is already published — bump menubar/Info.plist to cut a new one."
+  echo "v${version} is already published: run scripts/bump-version.sh <N.N.N> to cut a new one."
   exit 0
 fi
 
