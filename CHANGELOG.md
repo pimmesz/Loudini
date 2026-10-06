@@ -3,6 +3,62 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-10-06
+
+### Fixed
+- **No more silence after opening the lid.** While a MacBook slept, Loudini mistook
+  the brief maintenance wake-ups for a stalled audio path and kept rebuilding it all
+  night; once, the rebuild after a real wake never started, which can mean up to a
+  minute of silence. Loudini now waits after any sleep before judging the audio path.
+- **Reset App Volumes now actually resets.** Before, a running Loudini ignored the
+  reset (from the menu or `loudini apps reset`) and quietly put the old per-app
+  levels back.
+- **Changes made at the same moment no longer undo each other.** The menu bar, the
+  CLI, the Stream Deck keys and the engine now take turns when they change your
+  settings, so a per-app level or mute you just set is not lost, Stream Deck presses
+  apply in the order you pressed them, and the brightness no longer jumps when the
+  menu and the CLI both change it.
+- **`loudini brightness` tells you when the monitor ignored it** instead of reporting
+  a level it never reached, and the menu no longer shows a brightness change that
+  did not happen.
+- A per-app slider no longer jumps out from under your pointer while you drag it, and
+  a rare crash of the menu-bar app when the engine status changed is gone.
+
+### Added
+- **Your interface keeps its own volume.** Loudini now remembers the level per
+  fixed-level output (a Scarlett, a DAC), so switching back to it brings back the
+  volume you left it at instead of whatever the speakers or AirPods were at.
+- **`loudini --version`**, and `loudini doctor` now warns when the audio engine
+  running is a different build than the one you installed (for example an old copy
+  from the Stream Deck plugin). The menu shows the same warning as a tooltip.
+- **The CLI warns when nothing is running to apply a change**, instead of succeeding
+  silently.
+
+### Changed
+- **Clearer menu.** When the audio path restarts, the menu says so instead of
+  sending you to a permission that is already fine. The menu uses plain words
+  ("Use Volume Keys", "Volume engine is not running"), shows one fix row for the
+  volume-key permission, and shows the fix for a conflicting app on the row itself.
+- **Fewer permission dialogs.** The keystroke (Input Monitoring) permission is only
+  asked for when you turn on brightness keys, and the first launch explains the two
+  permissions before macOS asks. Turning a key toggle off now stays off after a
+  restart, and turning on Start at Login opens System Settings when macOS needs your
+  approval.
+- **A second Loudini engine now waits instead of restarting every 10 seconds.** With
+  the LaunchAgent or the Stream Deck plugin installed next to the app, the spare
+  engine waits quietly and takes over when the running one stops.
+- Your Loudini settings and log in `~/.config/loudini` are now readable by your
+  account only, the log no longer records your output device's hardware ID, and it
+  rotates at 1 MB. App names can no longer slip terminal control codes into
+  `loudini apps` or the log.
+- Setting an app back to 100% now removes its per-app entry, so Loudini stops running
+  an extra audio tap for it.
+- The update check is now described in the README and on loudini.app: once a day it
+  asks GitHub whether a newer version exists, which shares your IP address with GitHub
+  and nothing else. Turn it off in the menu.
+- Better for VoiceOver and shaky hands: named sliders, spoken volume changes, and a
+  larger per-app mute button.
+
 ## [0.4.1] — 2026-07-21
 
 ### Fixed
