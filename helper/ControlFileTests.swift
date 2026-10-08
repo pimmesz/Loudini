@@ -30,6 +30,19 @@ private func checkEqual<T: Equatable>(_ label: String, _ got: T?, _ want: T?) {
     check(label, got == want, "got \(String(describing: got)), want \(String(describing: want))")
 }
 
+/// Run `body` with stderr sent to a pipe and return what it wrote. Only for short output:
+/// the pipe is read after `body` returns, so more than its buffer would block.
+private func capturingStderr(_ body: () -> Void) -> String {
+    let pipe = Pipe()
+    let saved = dup(STDERR_FILENO)
+    dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+    body()
+    dup2(saved, STDERR_FILENO)
+    close(saved)
+    try? pipe.fileHandleForWriting.close()
+    return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+}
+
 private func refuse(_ message: String) -> Never {
     FileHandle.standardError.write(Data("REFUSING TO RUN: \(message)\n".utf8))
     exit(2)  // scripts/test.sh checks for exactly this code to prove the guard works
@@ -565,9 +578,11 @@ private func testControlLockIsHeld() {
     check("control.lock is released afterwards", after >= 0 && flock(after, LOCK_EX | LOCK_NB) == 0)
 
     // A holder that never lets go (a stopped process) must not block the caller forever.
+    // Its stderr warning is captured, so it is checked here instead of cluttering the run.
     var ran = false
-    withControlLock { ran = true }
+    let warning = capturingStderr { withControlLock { ran = true } }
     check("withControlLock proceeds after a bounded wait", ran)
+    check("withControlLock warns when it writes unlocked", warning.contains("control.lock still held"), warning)
     close(after)
 }
 
