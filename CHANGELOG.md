@@ -3,6 +3,25 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-10-08
+
+### Fixed
+- **An update no longer leaves an old engine in charge.** A spare Loudini engine
+  waiting in the background now steps aside when Loudini is updated or rebuilt, so
+  the new version takes over. A spare engine started by the Stream Deck plugin also
+  goes away when the plugin quits unexpectedly, instead of lingering.
+- **Stream Deck keys show the new level right away.** After a press, the key shows
+  the volume you just set instead of the level from before the press.
+- **The log keeps every engine's lines.** When the log file rotates, a second
+  Loudini engine (from the login item or the Stream Deck plugin) keeps writing to the
+  current log instead of to an old file that is later deleted.
+
+### Changed
+- `loudini up`, `loudini down` and `loudini mute` now print the resulting level, for
+  example `gain=48 muted=false`.
+- Loudini logs a warning when a settings change waits more than half a second for
+  another program and then goes ahead anyway.
+
 ## [0.5.0] — 2026-10-06
 
 ### Fixed
