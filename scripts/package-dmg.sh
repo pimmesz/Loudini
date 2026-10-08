@@ -278,7 +278,9 @@ else
   cp -R "${app}" "${stage}/"
   ln -s /Applications "${stage}/Applications"
   rm -f "${dmg}"
-  hdiutil create -volname "Loudini" -srcfolder "${stage}" -ov -format UDZO "${dmg}" >/dev/null
+  # Versioned name: on this build Mac, hdiutil refuses a volume named plain "Loudini"
+  # holding Loudini.app ("Operation not permitted"), while any other name works.
+  hdiutil create -volname "Loudini ${version}" -srcfolder "${stage}" -ov -format UDZO "${dmg}" >/dev/null
   rm -rf "${stage}"
 
   log "signing the DMG…"
