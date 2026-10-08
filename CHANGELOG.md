@@ -3,6 +3,12 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — 2026-10-08
+
+### Changed
+- Maintenance release, and the first one delivered through the one-click
+  updater from 0.6.0. Nothing about how Loudini works changes.
+
 ## [0.6.0] — 2026-10-08
 
 ### Added
