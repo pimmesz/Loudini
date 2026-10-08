@@ -3,6 +3,20 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-10-08
+
+### Added
+- **One-click updates.** Loudini now downloads new versions in the background.
+  When one is ready, the menu shows "Install Update ... and Relaunch": one click
+  installs it and restarts Loudini, with your settings and permissions intact.
+  If you don't click, it installs the next time Loudini quits. Turn it off with
+  "Check for Updates Automatically". This version itself installs by hand once;
+  every update after it is one click.
+
+### Changed
+- The daily update check still shares only your IP address with GitHub. When a
+  new version exists, downloading it also shows GitHub which version you fetched.
+
 ## [0.5.1] — 2026-10-08
 
 ### Fixed
