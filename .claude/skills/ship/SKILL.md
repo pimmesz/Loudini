@@ -57,6 +57,11 @@ Run it when the diff touches `scripts/`.
 - **The IOProc is a real-time callback.** No locks, no allocation, no I/O on that path.
 - **Tests must never touch the real `~/.config/loudini`.** `scripts/test.sh` isolates via
   `CFFIXED_USER_HOME`; `$HOME` does NOT work, `homeDirectoryForCurrentUser` ignores it.
+- **The Sparkle key is load-bearing.** Installed copies accept an update signed with the EdDSA
+  key in the login Keychain (account `loudini`, public half = `SUPublicEDKey`) or with the same
+  Developer ID. Don't regenerate it; `make-appcast.sh` refuses a release when the two disagree.
+  A release that raises `LSMinimumSystemVersion` needs an appcast that keeps the previous item. A first release on a
+  new Mac stops on a Keychain prompt for `sign_update`: Always Allow.
 - **The version lives in five files.** Never hand-edit; `scripts/bump-version.sh` writes
   all five and preflight enforces agreement.
 
@@ -173,6 +178,7 @@ Rules for this sequence:
   ```sh
   gh release list --repo pimmesz/Loudini
   curl -sIL -o /dev/null -w "%{http_code}\n" https://github.com/pimmesz/Loudini/releases/latest/download/Loudini.dmg
+  curl -sL https://github.com/pimmesz/Loudini/releases/latest/download/appcast.xml | grep -o 'shortVersionString>[^<]*'
   ```
   That URL is what loudini.app's download button points at. `200` means shipped.
 

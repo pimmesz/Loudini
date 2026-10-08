@@ -56,6 +56,8 @@ path, version = sys.argv[1], sys.argv[2]
 with open(path, 'rb') as f:
     data = plistlib.load(f)
 data['CFBundleShortVersionString'] = version
+# Sparkle compares CFBundleVersion to decide whether an update is newer, so it moves too.
+data['CFBundleVersion'] = version
 with open(path, 'wb') as f:
     plistlib.dump(data, f, sort_keys=False)
 PY

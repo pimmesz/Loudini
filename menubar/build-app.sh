@@ -31,6 +31,9 @@ echo "building loudini-helper (daemon + CLI)…"
   "${version_swift}" \
   -framework CoreAudio -framework AudioToolbox -framework Foundation -framework AppKit -framework IOKit)
 
+# The in-app updater framework, pinned and checksum-verified.
+sparkle_dir="$("${menubar_dir}/fetch-sparkle.sh")"
+
 rm -rf "${app:?}"
 mkdir -p "${app}/Contents/MacOS"
 
@@ -42,9 +45,11 @@ swiftc -O -parse-as-library -target "${target}" \
   "${menubar_dir}/HUDWindow.swift" \
   "${menubar_dir}/DDCBrightness.swift" \
   "${menubar_dir}/BrightnessKeyListener.swift" \
+  "${menubar_dir}/Updater.swift" \
   "${repo_dir}/helper/ControlFile.swift" \
   "${repo_dir}/helper/Conflicts.swift" \
   "${version_swift}" \
+  -F "${sparkle_dir}" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   -framework AppKit
 
 cp "${menubar_dir}/Info.plist" "${app}/Contents/Info.plist"
@@ -54,6 +59,13 @@ cp "${menubar_dir}/AppIcon.icns" "${app}/Contents/Resources/AppIcon.icns"
 cp "${menubar_dir}/MenuBarIcon.png" "${app}/Contents/Resources/MenuBarIcon.png"
 cp "${helper}" "${app}/Contents/MacOS/loudini-helper"
 chmod 755 "${app}/Contents/MacOS/loudini-helper"
+
+# Embed Sparkle. Its XPC services exist only for sandboxed apps, and Loudini is not
+# sandboxed, so they go rather than ship and sign code that never runs.
+mkdir -p "${app}/Contents/Frameworks"
+ditto "${sparkle_dir}/Sparkle.framework" "${app}/Contents/Frameworks/Sparkle.framework"
+sparkle_fw="${app}/Contents/Frameworks/Sparkle.framework"
+rm -rf "${sparkle_fw}/XPCServices" "${sparkle_fw}/Versions/B/XPCServices"
 
 # Signing picks the best identity present, in order:
 #   1. Developer ID Application → RELEASE build: hardened runtime + secure
@@ -70,15 +82,22 @@ devid="$(security find-identity -v -p codesigning 2>/dev/null \
          | grep -o 'Developer ID Application: [^"]*' | head -1 || true)"
 if [[ -n "${devid}" ]]; then
   sign=(--force --options runtime --timestamp --entitlements "${entitlements}" --sign "${devid}")
+  nested=(--force --options runtime --timestamp --sign "${devid}")
   echo "signing RELEASE with: ${devid}"
 elif security find-identity -p codesigning 2>/dev/null | grep -q "Loudini Dev"; then
   sign=(--force --timestamp=none --sign "Loudini Dev")
+  nested=("${sign[@]}")
   echo "signing DEV with: Loudini Dev (self-signed, stable)"
 else
   sign=(--force --timestamp=none --sign -)
+  nested=("${sign[@]}")
   echo "signing AD-HOC (no cert): permissions reset on every rebuild; fix: scripts/make-dev-cert.sh"
 fi
-# Sign the nested helper before the outer bundle (inside-out, as codesign wants).
+# Sign inside-out, as codesign wants: Sparkle's own executables, the framework, the
+# helper, then the app. Sparkle gets no entitlements; those are for the audio tap.
+codesign "${nested[@]}" "${sparkle_fw}/Versions/B/Autoupdate"
+codesign "${nested[@]}" "${sparkle_fw}/Versions/B/Updater.app"
+codesign "${nested[@]}" "${sparkle_fw}"
 codesign "${sign[@]}" "${app}/Contents/MacOS/loudini-helper"
 codesign "${sign[@]}" "${app}"
 # The LaunchAgent (scripts/install-daemon.sh) runs the repo helper directly:

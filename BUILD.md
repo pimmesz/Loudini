@@ -381,6 +381,40 @@ Notes:
   tap under the hardened runtime). Verify at first notarization; add entitlements only if the runtime or
   `notarytool` log flags a specific denial.
 
+### In-app updates (Sparkle)
+
+The app updates itself through [Sparkle](https://sparkle-project.org) 2. `menubar/fetch-sparkle.sh`
+downloads the pinned release into `vendor/` (gitignored) and checks it against the pinned sha256;
+`build-app.sh` embeds `Sparkle.framework` (minus its XPC services, which only sandboxed apps use) and
+signs it with the app's identity. To move to a newer Sparkle, change the version and checksum in
+`fetch-sparkle.sh` (GitHub shows the asset's sha256 on the release page).
+
+Each release ships `appcast.xml` next to the DMG. Installed copies read
+`releases/latest/download/appcast.xml` (`SUFeedURL` in `Info.plist`), download the DMG in the
+background, and accept it only if its EdDSA signature matches `SUPublicEDKey` or its Apple
+code signature matches the installed app. Sparkle decides
+"newer" from `CFBundleVersion`, so `bump-version.sh` sets it to the version and preflight checks it.
+
+The private signing key lives in the login Keychain (account `loudini`). One-time setup and custody:
+
+```sh
+vendor/sparkle-2.10.0/bin/generate_keys --account loudini            # once; prints the public key
+vendor/sparkle-2.10.0/bin/generate_keys --account loudini -x key.txt # back it up, then store it safely
+vendor/sparkle-2.10.0/bin/generate_keys --account loudini -f key.txt # restore on a new Mac
+```
+
+**Don't regenerate it.** Installed copies check updates against the public key they shipped with.
+Sparkle accepts an update when either that EdDSA signature or the Apple code signature matches, so a
+lost key is recoverable only while the Developer ID stays the same: ship an update signed with the
+same Developer ID that carries the new public key. Lose both and installed copies can no longer
+update. `scripts/make-appcast.sh` refuses to publish when the Keychain key and `SUPublicEDKey`
+disagree.
+
+The appcast lists only the newest release. That is fine while every release needs the same macOS
+(`LSMinimumSystemVersion`, 14.4). If a release ever raises it, the appcast must keep the last release
+the older macOS can install, or Macs left behind get no update at all. The first release after setup shows a Keychain prompt for
+`sign_update`; choose **Always Allow** so later releases don't stop on it.
+
 ### CI and releases
 
 Two GitHub Actions workflows (`.github/workflows/`):
@@ -398,19 +432,20 @@ Two GitHub Actions workflows (`.github/workflows/`):
 There is no cloud release workflow: releases are cut **locally** with `scripts/release.sh` (below),
 and no signing or notary secret is stored in GitHub (see DECISIONS.md, 2026-10-06).
 
-Cutting a release needs three things installed first: a **Developer ID Application** cert, the
-`loudini` notarytool keychain profile (both above), and the **GitHub CLI** (`gh`, authenticated with
+Cutting a release needs four things installed first: a **Developer ID Application** cert, the
+`loudini` notarytool keychain profile (both above), the Sparkle signing key (account `loudini`, see
+In-app updates), and the **GitHub CLI** (`gh`, authenticated with
 push access: `brew install gh && gh auth login`). `release.sh` publishes the Release through `gh` and
 aborts on its first call without one.
 
 Cut a release (locally, from your Mac): run `scripts/bump-version.sh <N.N.N>`, a version higher than
 the latest release. The version lives in five
-files that must agree (`menubar/Info.plist`, the plugin's `package.json` + Stream Deck manifest, the
+files that must agree (`menubar/Info.plist`, both `CFBundleShortVersionString` and `CFBundleVersion`, the plugin's `package.json` + Stream Deck manifest, the
 `docs/index.html` footer, and a `CHANGELOG.md` heading); the script backs up all five to a temp dir
 (printed before it rewrites anything, so a half-done bump is still recoverable), writes them, and adds a
 dated CHANGELOG skeleton. Fill that skeleton in. Preflight rejects the `TODO` placeholder, so a release
 can't publish it. Then commit, `git push origin main`, and run `scripts/release.sh`. It builds,
-notarizes, staples, and publishes the GitHub Release; re-running is safe (it bails if the version is
+notarizes, staples, signs the update feed (`appcast.xml`), and publishes both as the GitHub Release; re-running is safe (it bails if the version is
 already published).
 
 `scripts/preflight.sh` is the cheap gate behind that. Before `release.sh` builds anything it asserts the

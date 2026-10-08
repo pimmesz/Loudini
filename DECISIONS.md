@@ -217,3 +217,32 @@ Bringing back the fixed-level output's own level is the point; a press in that w
 pressed again. A stale ControlWatcher snapshot applied after the restore heals on the next
 100 ms poll. **Revisit if** a switch is seen to land at the wrong level and stay there.
 
+## 2026-10-08: One-click in-app updates through Sparkle
+
+**Decision.** The look-only update check (it opened the releases page; "Loudini never downloads or
+installs itself") is replaced by Sparkle 2. Once a day the app reads
+`releases/latest/download/appcast.xml`, downloads a newer DMG in the background, and the menu offers
+**Install Update … and Relaunch**: one click installs it and relaunches. An update nobody clicks
+installs when Loudini next quits. **Check for Updates Automatically** switches the check and the
+download off together, and an earlier "off" from the old check carries over. It cannot cancel an update
+that already started downloading: Sparkle installs that one at quit, and the README says so.
+
+**Why.** Updating meant opening a web page, mounting a DMG and dragging the app, so most installs stayed
+on old builds (0.5.0 never even reached users). One click is what makes fixes actually land.
+
+**How it stays safe and quiet.** Sparkle installs only a DMG whose EdDSA signature matches
+`SUPublicEDKey` or whose Apple code signature matches the installed app. The private key lives in the
+maintainer's login Keychain (account `loudini`); a lost key is recoverable while the Developer ID
+stays the same, losing both strands installed copies. Requests carry a bare `User-Agent: Loudini` and
+`Accept-Language: en`, the same as the old check: the daily check shows GitHub only the IP address, and
+a download also shows which release was fetched. Sparkle is pinned by version and sha256 (`menubar/fetch-sparkle.sh`) and its XPC services,
+used only by sandboxed apps, are not shipped.
+
+**Cost.** First third-party code in the app, a key to keep safe, and an `appcast.xml` per release
+(`scripts/make-appcast.sh`, run by `release.sh`). Copies from 0.5.1 and older cannot self-update into
+this; they update once by hand.
+
+**Revisit if.** A release raises `LSMinimumSystemVersion` (the appcast then has to keep the last
+release older macOS can install), the key or the Developer ID is lost, Sparkle stops being maintained,
+or Loudini ever becomes sandboxed (the XPC services would then be required).
+

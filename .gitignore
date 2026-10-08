@@ -5,6 +5,8 @@ menubar/Loudini.app/
 menubar/AppIcon.iconset/
 # release build output (Loudini.dmg / Loudini.zip)
 dist/
+# Sparkle, fetched and checksum-verified by menubar/fetch-sparkle.sh
+vendor/
 
 # pnpm project: npm lockfiles must never be committed
 package-lock.json

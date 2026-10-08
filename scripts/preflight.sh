@@ -30,6 +30,11 @@ if [[ "${1:-}" == "--allow-changelog-placeholder" ]]; then allow_placeholder=1; 
 version="$(bash "${script_dir}/version.sh")" || exit 1
 
 # --- 1. the other four homes must match ----------------------------------------
+# Sparkle decides "newer" from CFBundleVersion, so a stale one hides an update from everyone.
+bundle_version="$(python3 -c "import plistlib; print(plistlib.load(open('menubar/Info.plist','rb'))['CFBundleVersion'])")"
+[[ "${bundle_version}" == "${version}" ]] ||
+  fail "menubar/Info.plist CFBundleVersion is ${bundle_version}, expected ${version}."
+
 pkg_version="$(python3 -c "import json; print(json.load(open('plugin/package.json'))['version'])")"
 [[ "${pkg_version}" == "${version}" ]] ||
   fail "plugin/package.json is ${pkg_version}, expected ${version}."

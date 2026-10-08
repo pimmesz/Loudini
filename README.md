@@ -21,9 +21,14 @@ More at [loudini.app](https://loudini.app) · [all releases](https://github.com/
 
 Open the `.dmg`, drag Loudini to Applications, then follow **First run** below.
 
-Network: once a day the menu-bar app asks GitHub (api.github.com) whether a newer release exists.
-That shares your IP address with GitHub and nothing else; nothing is downloaded or installed. Turn it
-off with **Check for Updates Automatically** in the menu.
+Updates: once a day the menu-bar app asks GitHub whether a newer release exists, which shares your IP
+address with GitHub and nothing else. A newer release then downloads from GitHub in the background, so
+GitHub also sees which release you fetched, and the menu shows **Install Update … and Relaunch**: one
+click installs it (otherwise it installs the next time Loudini quits). Loudini installs an update only
+when it carries Loudini's own signature. **Check for Updates Automatically** in the menu stops the
+check and the download from then on; an update that already started downloading still installs when
+Loudini next quits.
+Copies from 0.5.1 and older only link to the download page, so update those once by hand.
 
 ## Build from source
 

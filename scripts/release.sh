@@ -91,6 +91,11 @@ fi
 log "cutting release v${version}: building + notarizing (per-phase timing below; Ctrl-C is safe)…"
 "${script_dir}/package-dmg.sh"
 
+# The in-app updater's feed, signed against the final stapled DMG bytes. It ships as a
+# release asset, so releases/latest/download/appcast.xml always names the newest DMG.
+appcast="${repo_dir}/dist/appcast.xml"
+"${script_dir}/make-appcast.sh" "${version}" "${dmg}" > "${appcast}"
+
 # Release notes = this version's CHANGELOG section, if present.
 notes="$(mktemp)"
 trap 'rm -f "${notes}"' EXIT
@@ -114,10 +119,10 @@ if gh release view "v${version}" >/dev/null 2>&1; then
     echo "ERROR: a v${version} release already exists (draft=${rel_draft}, target=${rel_target}) that isn't this HEAD build: 'gh release delete v${version} --cleanup-tag --yes' and re-run." >&2
     exit 1
   fi
-  gh release upload "v${version}" "${dmg}" --clobber
+  gh release upload "v${version}" "${dmg}" "${appcast}" --clobber
   gh release edit "v${version}" --draft=false
 else
-  gh release create "v${version}" "${dmg}" \
+  gh release create "v${version}" "${dmg}" "${appcast}" \
     --target "${head_sha}" \
     --title "Loudini v${version}" \
     --notes-file "${notes}"
