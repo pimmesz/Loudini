@@ -175,3 +175,45 @@ error-handling-3), `plugin/src/actions.ts:13` (error-handling-4).
 The menu-bar Output row gets a warning tooltip when the running daemon's build differs from
 the app's; `loudini doctor` already warns. No new menu row.
 
+## 2026-10-08: Verdicts on the 2026-10-06 concurrency audit needs-decision items
+
+Recorded with audit-decide. Finding ids are the audit's own (ledger
+`~/.claude/audit-ledger/Loudini/concurrency-audit-2026-10-06-063bd81.md`); lead ids are
+the three Swift findings its gate dropped, checked by hand.
+
+### control.lock wait stays bounded, now logged (do now, residual accepted)
+
+`helper/ControlFile.swift:219` (check-then-act-1, file-write-races-1). After 100 x 5 ms
+`withControlLock` still runs the read-modify-write without the lock, so a stuck holder
+cannot freeze the daemon's engine queue. It now logs a warning when that happens.
+**Accepted residual:** a holder stopped for more than 0.5 s (SIGSTOP, a debugger, heavy
+swapping) can lose one other writer's volume step, mute or per-app edit. README and
+BUILD.md say the lock is bounded. **Revisit if** daemon.log shows the warning outside a
+debugging session.
+
+### A waiting daemon polls and steps aside for a newer build or a dead parent (do now)
+
+`helper/loudini-helper.swift:1917` (overlapping-runs-1, cancellation-cleanup-1). A daemon
+that lost `daemon.lock` tries `LOCK_NB` once a second instead of a blocking wait. Before
+each try it exits if its own executable changed on disk, so its spawner starts the new
+build, and, when it was not started by launchd, if its parent is gone. A daemon that
+already holds the lock keeps running as before. Cost: takeover can lag by up to 1 s.
+
+### The CLI prints the level after up, down and mute (do now)
+
+`plugin/src/actions.ts:44` (ordering-1). The plugin paints the key from that output
+instead of a status.json the daemon has not rewritten yet.
+
+### daemon.log rotates by copy and truncate (do now)
+
+`menubar/LoudiniApp.swift:1243` (lead file-write-races-2). A rename stranded every other
+daemon that holds the log open in daemon.log.1, and the next rotation deleted it. Copy
+then truncate keeps them on the live file; a few ms of lines can be lost in between.
+
+### A press during the 0.3 s rebuild after an output switch loses to the restore (accepted)
+
+`helper/loudini-helper.swift:1076`, `:1286` (leads ordering-2, shared-mutable-state-1).
+Bringing back the fixed-level output's own level is the point; a press in that window is
+pressed again. A stale ControlWatcher snapshot applied after the restore heals on the next
+100 ms poll. **Revisit if** a switch is seen to land at the wrong level and stay there.
+

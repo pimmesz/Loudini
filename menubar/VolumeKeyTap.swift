@@ -1,4 +1,4 @@
-// VolumeKeyTap.swift — grabs the hardware volume keys with a session CGEventTap.
+// VolumeKeyTap.swift: grabs the hardware volume keys with a session CGEventTap.
 //
 // Media keys arrive as NX_SYSDEFINED (CGEventType 14) system events. We consume
 // volume up/down/mute (return nil from the callback) so macOS never shows its
@@ -7,7 +7,7 @@
 
 import AppKit
 
-// From <IOKit/hidsystem/ev_keymap.h> — not exposed to Swift.
+// From <IOKit/hidsystem/ev_keymap.h>: not exposed to Swift.
 private let NX_KEYTYPE_SOUND_UP: Int64 = 0
 private let NX_KEYTYPE_SOUND_DOWN: Int64 = 1
 private let NX_KEYTYPE_BRIGHTNESS_UP: Int64 = 2
@@ -21,12 +21,12 @@ final class VolumeKeyTap {
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    /// `fine` is true when Shift is held — a request for a small, 1-per-press
+    /// `fine` is true when Shift is held: a request for a small, 1-per-press
     /// adjustment instead of the coarse default step.
     private let handler: (_ key: Key, _ fine: Bool) -> Void
 
     /// Consulted per event, on the main run loop. When false, volume keys pass
-    /// through to macOS untouched — Loudini only owns them while its daemon is
+    /// through to macOS untouched: Loudini only owns them while its daemon is
     /// actually controlling audio.
     var shouldConsume: () -> Bool = { true }
 
@@ -35,13 +35,13 @@ final class VolumeKeyTap {
     var shouldConsumeBrightness: () -> Bool = { false }
 
     /// `handler` is called on the main run loop (where the tap lives); it must
-    /// not block — hand real work to another queue.
+    /// not block: hand real work to another queue.
     init(handler: @escaping (_ key: Key, _ fine: Bool) -> Void) {
         self.handler = handler
     }
 
     deinit {
-        // The callback holds `self` unretained — never let a live tap outlive us.
+        // The callback holds `self` unretained: never let a live tap outlive us.
         stop()
     }
 

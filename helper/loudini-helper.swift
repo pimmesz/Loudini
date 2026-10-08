@@ -1,11 +1,11 @@
-// loudini-helper.swift — Loudini system-audio gain daemon (macOS 14.4+ process taps)
+// loudini-helper.swift: Loudini system-audio gain daemon (macOS 14.4+ process taps)
 //
 // Taps output-producing processes and re-renders them to the current default
 // output device (or --device <UID>) through an IOProc that multiplies samples
 // by a software master gain. Approach A per-app volume (Phase 2): each app with
 // an entry in control.json's `apps` map gets its OWN private tap feeding its own
 // gain; those are summed with the global tap (which excludes them) BEFORE the
-// master multiply. A per-app tap that fails to create falls open — its app just
+// master multiply. A per-app tap that fails to create falls open: its app just
 // rides the global/master path, audio never dropped. Direct paths are muted
 // (.mutedWhenTapped).
 //
@@ -26,7 +26,7 @@
 // aggregate (they are private objects owned by this HAL client) and audio
 // returns to the normal direct path.
 //
-// Build:  menubar/build-app.sh  — the single source of the build command (source list,
+// Build:  menubar/build-app.sh is the single source of the build command (source list,
 //         frameworks, and the -target that pins the macOS 14.4 floor). Building by hand
 //         risks omitting a file the build adds.
 // Usage:  loudini-helper [--device <UID>]   (daemon)
@@ -41,8 +41,8 @@
 import Foundation
 import CoreAudio
 import AudioToolbox
-import AppKit   // NSRunningApplication — resolve pid -> localized app name for the roster
-import Darwin   // proc_name — name fallback for audio sources without a bundle
+import AppKit   // NSRunningApplication: resolve pid -> localized app name for the roster
+import Darwin   // proc_name: name fallback for audio sources without a bundle
 
 // MARK: - logging
 
@@ -190,7 +190,7 @@ final class Pipeline {
     // exactly these apps' processes, so nothing is double-counted; an app whose
     // tap failed to create is left in the global tap (fail-open -> master path).
     private(set) var appTapIDs: [AudioObjectID] = []
-    /// bundle ids of the app taps we actually built, in buffer order — lets the
+    /// bundle ids of the app taps we actually built, in buffer order: lets the
     /// engine map a bundle id to its gain slot for lock-free in-place updates.
     private(set) var bundleIDsInOrder: [String] = []
     /// Per-app gain slots, one per built app tap, read unsynchronized by the IO
@@ -217,7 +217,7 @@ final class Pipeline {
     var gain: Float
 
     /// Render heartbeat: bumped once per IO callback so the engine can tell a
-    /// live pipeline from a wedged one. Same lock-free deal as `gain` — the IO
+    /// live pipeline from a wedged one. Same lock-free deal as `gain`: the IO
     /// thread is the only writer, everyone else only reads, and a word-aligned
     /// 64-bit store is atomic on arm64, so the render loop neither locks nor
     /// allocates for it. Wraps harmlessly: the watchdog only compares samples.
@@ -239,8 +239,8 @@ final class Pipeline {
         self.gain = gain
         self.meterEnabled = meter
         // Upper bound: never more built taps than requested. Cleanup of appGains
-        // is NOT left to deinit — Swift does not reliably run deinit for a
-        // throwing initializer even after full initialization — so every throw
+        // is NOT left to deinit (Swift does not reliably run deinit for a
+        // throwing initializer even after full initialization), so every throw
         // path below calls freeAppGains() explicitly; the flag it checks makes a
         // later deinit call a harmless no-op.
         let gainCapacity = max(1, appTaps.count)
@@ -250,7 +250,7 @@ final class Pipeline {
         // 1. Per-app taps (approach A). Each is a private stereo mixdown of one
         //    bundle's live processes. Fail-open PER TAP: a tap that won't create
         //    is dropped and its app simply stays in the global tap below, riding
-        //    the master path — its audio is never lost.
+        //    the master path: its audio is never lost.
         var appTapUIDs: [String] = []
         var tappedProcs: [AudioObjectID] = []
         for spec in appTaps where !spec.procs.isEmpty {
@@ -395,7 +395,7 @@ final class Pipeline {
             }
 
             // Sum every tap into the (pre-zeroed) output, each scaled by its own
-            // gain times the master g — folding the master multiply into each add
+            // gain times the master g: folding the master multiply into each add
             // keeps it a single pass and allocation/lock-free. Global tap gain is
             // 1.0 (untouched apps); app-tap gain is the per-app slot. sIn meters
             // the global tap only (representative), sOut the mixed result.
@@ -542,7 +542,7 @@ final class Pipeline {
 // MARK: - live "producing audio" roster (identity only, published to status.json)
 
 /// Watches Core Audio's process objects and maintains the short list of apps
-/// that are actually rendering output right now — the whole point of the
+/// that are actually rendering output right now: the whole point of the
 /// per-app feature is showing *only* what's making sound, not every dormant
 /// audio client. The signal is `kAudioProcessPropertyIsRunningOutput`; identity
 /// comes from `kAudioProcessPropertyPID` + `kAudioProcessPropertyBundleID`.
@@ -698,7 +698,7 @@ final class AppRoster {
             }
         }
         for (key, e) in entries where e.active && !activeKeys.contains(key) {
-            // Just went silent — start the linger clock from now.
+            // Just went silent: start the linger clock from now.
             e.active = false
             e.lastActive = now
         }
@@ -736,14 +736,14 @@ final class AppRoster {
         // Last resort: the executable name beats a bare id tail, which for helper
         // bundle ids is literally "helper".
         if let n = processName(pid: pid) { return n }
-        // `.last` on an empty id yields "" (not nil), so check the tail is real —
+        // `.last` on an empty id yields "" (not nil), so check the tail is real:
         // a bundle-less source whose process name is gone must still name its pid.
         let tail = bundleID.components(separatedBy: ".").last ?? ""
         return tail.isEmpty ? "pid \(pid)" : tail
     }
 
     /// WebKit plays audio from a helper process that macOS DOES register, under the
-    /// name "<App> Graphics and Media" — Safari, and anything embedding WebKit. The
+    /// name "<App> Graphics and Media": Safari, and anything embedding WebKit. The
     /// suffix is noise in a volume row, so drop it: the user thinks of it as Safari.
     /// Only ever trims, never invents, so an app genuinely called that keeps its name.
     private static func trimHelperSuffix(_ name: String) -> String {
@@ -754,12 +754,12 @@ final class AppRoster {
     }
 
     /// Browsers and Electron apps render audio from helper processes, which are
-    /// not registered apps — so the pid lookup fails and the id tail is useless.
+    /// not registered apps, so the pid lookup fails and the id tail is useless.
     /// Their ids nest under the parent app ("com.google.Chrome.helper.renderer"),
     /// so drop trailing components until a running app claims the id.
     private func parentAppName(bundleID: String) -> String? {
         var parts = bundleID.components(separatedBy: ".")
-        // Stop above 2 components — "com" on its own is never a real app id.
+        // Stop above 2 components: "com" on its own is never a real app id.
         while parts.count > 2 {
             parts.removeLast()
             let parentID = parts.joined(separator: ".")
@@ -840,7 +840,7 @@ final class Engine {
     /// rope, because a fresh aggregate can take a while to start pumping and an
     /// app can be "producing output" on a device that isn't ours.
     private static let startupStallWindow: TimeInterval = 60.0
-    /// Grace between the stall teardown and its rebuild — let the HAL settle.
+    /// Grace between the stall teardown and its rebuild: let the HAL settle.
     private static let stallRebuildDelay: TimeInterval = 2.0
     /// Rebuild after a stall at most this often. A pipeline that wedges again
     /// straight away is not something a fast rebuild loop fixes.
@@ -886,7 +886,7 @@ final class Engine {
         mScope: kAudioObjectPropertyScopeOutput,
         mElement: kAudioObjectPropertyElementMain)
     private var volumeListener: AudioObjectPropertyListenerBlock!
-    /// The scalar Loudini itself last wrote — lets the listener ignore its own
+    /// The scalar Loudini itself last wrote: lets the listener ignore its own
     /// echo and react only to external changes (Touch Bar, another app).
     private var lastAppliedScalar: Float = -1
 
@@ -899,7 +899,7 @@ final class Engine {
         queue.sync {
             control = initialControl
 
-            // NOTE: deliberately NO kAudioHardwarePropertyDevices listener — our
+            // NOTE: deliberately NO kAudioHardwarePropertyDevices listener: our
             // own aggregate create/destroy fires it, which feedback-loops into
             // endless rebuilds (observed live). Hot-plug of a missing target
             // device is covered by the 2s retry loop instead; removal/rate
@@ -979,7 +979,7 @@ final class Engine {
             pipeline?.gain = softwareGain(newControl)
             // On a device that owns its volume, the master IS the device scalar:
             // drive it (echo-guarded) so the Touch Bar / Sound settings and
-            // Loudini stay one control. Never pins to 100% — sets the real level.
+            // Loudini stay one control. Never pins to 100%: sets the real level.
             // Only on an actual master-gain change, so mute / per-app edits don't
             // rewrite (and slightly re-round) the device level.
             if masterViaScalar, gainChanged, let dev = currentDevice {
@@ -991,7 +991,7 @@ final class Engine {
             }
             // Per-app: rebuild only if the tapped-process SET changed (a bundle
             // gained/lost an override, or its process set changed). A pure gain
-            // change reuses the existing taps — a lock-free float store, no HAL
+            // change reuses the existing taps: a lock-free float store, no HAL
             // churn, no render glitch. The process-list scan only runs when the
             // override keys changed; launches and quits go through reconcileAppTaps.
             if pipeline != nil {
@@ -1009,7 +1009,7 @@ final class Engine {
     }
 
     /// The per-app taps we WANT right now: each overridden bundle id that has at
-    /// least one live process object, paired with those objects (all of them —
+    /// least one live process object, paired with those objects (all of them:
     /// one bundle can have several audio processes, e.g. Chrome helpers). Sorted
     /// for a stable signature.
     private func desiredAppTaps() -> [(bundleID: String, procs: [AudioObjectID])] {
@@ -1031,7 +1031,7 @@ final class Engine {
             .joined(separator: "|")
     }
 
-    /// Process list changed — rebuild only if that moved the tapped-process set
+    /// Process list changed: rebuild only if that moved the tapped-process set
     /// (an overridden app launched/quit). Pauses and unrelated apps are no-ops.
     private func reconcileAppTaps() {
         guard !isShutdown, pipeline != nil else { return }   // pipeline down -> retry loop rebuilds
@@ -1090,7 +1090,7 @@ final class Engine {
         Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 
-    /// One sample of the render heartbeat. Conservative on purpose — it only
+    /// One sample of the render heartbeat. Conservative on purpose: it only
     /// acts on a pipeline that has gone completely quiet for the whole stall
     /// window with at least one app actively producing output the whole time.
     private func checkRenderStall() {
@@ -1152,13 +1152,13 @@ final class Engine {
                                      grace: Self.stallRebuildDelay, cooldown: Self.stallRebuildCooldown)
         lastStallRebuild = now + delay
         if delay > Self.stallRebuildDelay {
-            log("a stall rebuild ran less than \(Int(Self.stallRebuildCooldown))s ago — "
+            log("a stall rebuild ran less than \(Int(Self.stallRebuildCooldown))s ago: "
                 + "waiting \(Int(delay))s before rebuilding again (audio stays on the direct path)")
         }
         scheduleRebuild(reason: "render stalled", after: delay)
     }
 
-    // MARK: device-volume (scalar) plumbing — all on `queue`
+    // MARK: device-volume (scalar) plumbing, all on `queue`
 
     /// Whether `dev` exposes a settable master output volume scalar.
     private func deviceHasSettableVolume(_ dev: AudioObjectID) -> Bool {
@@ -1178,7 +1178,7 @@ final class Engine {
     @discardableResult
     private func writeScalar(_ dev: AudioObjectID, _ value: Float) -> Bool {
         var a = volumeAddr; var v = Float32(min(1, max(0, value)))
-        // Advance the echo guard only on success — a failed set leaves the
+        // Advance the echo guard only on success: a failed set leaves the
         // device at its old level (a no-op volume change, never full blast).
         guard AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v) == 0 else {
             log("device volume set failed (scalar \(v)); level unchanged this cycle", .error)
@@ -1266,7 +1266,7 @@ final class Engine {
 
         guard let selfProc = processObject(forPID: getpid()) else {
             logRebuildFailure(reason: reason, "cannot resolve own HAL process object yet, retrying in 2s")
-            // The old pipeline is already destroyed — publish that truthfully,
+            // The old pipeline is already destroyed: publish that truthfully,
             // or status.json keeps claiming pipeline:true through the retries.
             currentDevice = nil
             lastReason = "cannot resolve own HAL process object"
@@ -1276,7 +1276,7 @@ final class Engine {
         }
 
         // Does this output own its volume? Both capability AND a successful read
-        // are required — otherwise fall back to software gain as master (safe).
+        // are required: otherwise fall back to software gain as master (safe).
         // The device level is adopted AFTER the listener is live (below).
         masterViaScalar = deviceHasSettableVolume(dev.id) && readScalar(dev.id) != nil
 
@@ -1304,7 +1304,7 @@ final class Engine {
 
         // Build the pipeline and start its IOProc, cleaning up on any failure.
         // `start()` (AudioDeviceStart) is NOT covered by Pipeline's internal
-        // fail-open — only tap/aggregate/IOProc *creation* is. Without a start
+        // fail-open: only tap/aggregate/IOProc *creation* is. Without a start
         // failure orphaning the live tap+aggregate inside coreaudiod on every
         // retry (the daemon stays alive, so die-time cleanup never happens),
         // destroy explicitly before rethrowing.
@@ -1327,13 +1327,13 @@ final class Engine {
             } catch {
                 // A per-app pipeline that built but wouldn't START: fall open to
                 // global-only NOW rather than tearing down and retrying the SAME
-                // per-app config on the retry loop — otherwise one problematic app
+                // per-app config on the retry loop: otherwise one problematic app
                 // tap keeps the entire master pipeline unavailable. This mirrors
                 // Pipeline.init's fail-open for the aggregate/IOProc build. If
                 // there were no per-app taps to drop, there is nothing to fall
                 // open to, so rethrow into the retry loop (audio stays direct).
                 guard !specs.isEmpty else { throw error }
-                log("per-app pipeline failed to start: \(error.localizedDescription) — "
+                log("per-app pipeline failed to start: \(error.localizedDescription), "
                     + "dropping all per-app taps to the master path and rebuilding global-only (fail-open)", .error)
                 p = try buildAndStart([])
             }
@@ -1353,7 +1353,7 @@ final class Engine {
             // Listener is now live: adopt the device's current level so a rebuild
             // never jumps it, and any change from here on fires onExternalVolume.
             // If the read fails now (it succeeded during detection), don't trust a
-            // stale gain — fall back to software gain as master (safe, no jump).
+            // stale gain: fall back to software gain as master (safe, no jump).
             if masterViaScalar {
                 if let s = readScalar(dev.id) {
                     control.gain = clampGain(Int((s * 100).rounded()))
@@ -1427,7 +1427,7 @@ final class Engine {
     }
 
     /// The roster to publish: the live "producing audio" list with each entry's
-    /// gain/muted overlaid from the active per-app override — but ONLY for apps
+    /// gain/muted overlaid from the active per-app override, but ONLY for apps
     /// whose per-app tap the current pipeline actually BUILT. An app that fell
     /// open to the master path (its tap failed to create, the aggregate/IOProc
     /// build dropped it, or the pipeline is down) receives master-only gain, so
@@ -1450,7 +1450,7 @@ final class Engine {
                                     device: currentDevice?.name ?? "", reason: lastReason,
                                     apps: appsForStatus()) else { return }
         if lastStatusData == data { return }
-        // Only mark this state as published once the write actually lands — a
+        // Only mark this state as published once the write actually lands: a
         // transient write failure must not suppress the retry on the next tick.
         do {
             try atomicWrite(data, to: statusURL)
@@ -1554,7 +1554,7 @@ enum LoudiniHelper {
         }
     }
 
-    // MARK: CLI subcommands — read/modify/atomic-write control.json, then exit.
+    // MARK: CLI subcommands, read/modify/atomic-write control.json, then exit.
     // They never touch Core Audio; the running daemon applies the change on
     // its next 100 ms poll.
 
@@ -1578,11 +1578,13 @@ enum LoudiniHelper {
                     guard let s = parsePercent(args[1]) else { usage() }
                     step = s
                 }
-                try ControlOps.nudge(args[0] == "up" ? step : -step)
+                let c = try ControlOps.nudge(args[0] == "up" ? step : -step)
+                print("gain=\(c.gain) muted=\(c.muted)")
                 warnIfNoDaemon()
             case "mute":
                 guard args.count == 1 else { usage() }
-                try ControlOps.toggleMute()
+                let c = try ControlOps.toggleMute()
+                print("gain=\(c.gain) muted=\(c.muted)")
                 warnIfNoDaemon()
             case "set":
                 guard args.count == 2, let g = Int(args[1]) else { usage() }
@@ -1625,7 +1627,7 @@ enum LoudiniHelper {
                 let roster = readStatus()?.apps ?? []
                 guard let bid = resolveAppTarget(args[1], roster) else {
                     FileHandle.standardError.write(
-                        Data("error: no app matches \"\(args[1])\" — try `loudini apps`\n".utf8))
+                        Data("error: no app matches \"\(args[1])\"; try `loudini apps`\n".utf8))
                     exit(1)
                 }
                 switch args[2] {
@@ -1662,7 +1664,7 @@ enum LoudiniHelper {
         }
     }
 
-    // MARK: brightness — external-monitor DDC control (no permission needed).
+    // MARK: brightness, external-monitor DDC control (no permission needed).
 
     private static func runBrightness(_ args: [String]) -> Never {
         guard DDC.isSupported else {
@@ -1701,7 +1703,7 @@ enum LoudiniHelper {
         }
     }
 
-    // MARK: doctor — diagnose the whole setup and print concrete fixes.
+    // MARK: doctor, diagnose the whole setup and print concrete fixes.
 
     private static func runDoctor() -> Never {
         var failures = 0
@@ -1739,7 +1741,7 @@ enum LoudiniHelper {
             fail("cannot write \(configDir.path): \(error.localizedDescription)")
         }
         if !FileManager.default.fileExists(atPath: controlURL.path) {
-            note("control.json missing (first run — created when the daemon starts or on `loudini set`)")
+            note("control.json missing (first run: created when the daemon starts or on `loudini set`)")
         } else if let data = try? Data(contentsOf: controlURL),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             // Per-key check matching the daemon's lenient parser exactly: it
@@ -1752,7 +1754,7 @@ enum LoudiniHelper {
                 var bad: [String] = []
                 if gain == nil { bad.append("gain") }
                 if muted == nil { bad.append("muted") }
-                warn("control.json parses, but \(bad.joined(separator: " and ")) missing/mistyped — "
+                warn("control.json parses, but \(bad.joined(separator: " and ")) missing/mistyped; "
                     + "the daemon keeps its last-good value for those",
                      fix: "loudini set 50   # rewrites the file atomically with both keys")
             }
@@ -1796,11 +1798,11 @@ enum LoudiniHelper {
             }
             if daemonAlive {
                 if !s.running {
-                    warn("daemon.lock held but status.json says running=false — daemon may be mid-start; re-run doctor")
+                    warn("daemon.lock held but status.json says running=false: daemon may be mid-start; re-run doctor")
                 } else if s.pipeline {
                     pass("audio pipeline live on \"\(s.device)\" (gain=\(s.gain) muted=\(s.muted))")
                 } else if s.reason == "render stalled" {
-                    warn("the audio pipeline stalled and was torn down — sound plays normally on the direct path, "
+                    warn("the audio pipeline stalled and was torn down: sound plays normally on the direct path, "
                          + "but Loudini's volume control is inactive until it rebuilds",
                          fix: "switch output device (or restart the daemon) to rebuild now; "
                             + "see ~/.config/loudini/daemon.log")
@@ -1809,16 +1811,16 @@ enum LoudiniHelper {
                          fix: "connect or select an output device (System Settings -> Sound)")
                 } else {
                     let detail = s.reason.isEmpty ? "" : " (daemon reports: \(s.reason))"
-                    fail("daemon running but NO audio pipeline — likely missing System Audio Recording permission\(detail)",
+                    fail("daemon running but NO audio pipeline: likely missing System Audio Recording permission\(detail)",
                          fix: "System Settings > Privacy & Security > Screen & System Audio Recording: turn on "
                             + "Loudini (or the app that started the daemon, such as Stream Deck); "
                             + "details in ~/.config/loudini/daemon.log")
                 }
             } else if s.running {
-                warn("stale status.json (claims running, but no daemon holds the lock — a daemon was killed hard)")
+                warn("stale status.json (claims running, but no daemon holds the lock: a daemon was killed hard)")
             }
         } else if daemonAlive {
-            warn("daemon running but status.json missing/unreadable — re-run doctor in a few seconds")
+            warn("daemon running but status.json missing/unreadable: re-run doctor in a few seconds")
         }
 
         print("launchd:")
@@ -1914,11 +1916,29 @@ enum LoudiniHelper {
                 exit(0)
             }
             log("another loudini-helper daemon is running; waiting to take over (\(loudiniVersion) exe=\(executablePath))")
-            while flock(lockFD, LOCK_EX) != 0 {
-                guard errno == EINTR else {
+            // Poll rather than block, so a waiter can step aside for a newer build or
+            // when its parent died (DECISIONS.md 2026-10-08).
+            let startStamp = executableStamp(atPath: executablePath)
+            let startParent = getppid()
+            let giveUpReason = {
+                waiterGiveUpReason(startStamp: startStamp, nowStamp: executableStamp(atPath: executablePath),
+                                   startParent: startParent, nowParent: getppid())
+            }
+            while flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+                guard errno == EWOULDBLOCK || errno == EINTR else {
                     log("cannot wait for daemon.lock (\(String(cString: strerror(errno)))), exiting", .error)
                     exit(1)
                 }
+                sleep(1)
+                if let why = giveUpReason() {
+                    log("stopped waiting for daemon.lock: \(why), exiting")
+                    exit(0)
+                }
+            }
+            // The lock can free between the last check and the try that won it.
+            if let why = giveUpReason() {
+                log("took daemon.lock but \(why), exiting")
+                exit(0)
             }
             log("took over daemon.lock")
         }
@@ -1927,7 +1947,7 @@ enum LoudiniHelper {
         // No default pre-create. control.json is created lazily and atomically by
         // the first frontend write (or the daemon's own publishGain), all under
         // control.lock. Writing a default here would race a frontend write that
-        // lands during startup (clobbering it), so we just read what's there —
+        // lands during startup (clobbering it), so we just read what's there:
         // an absent file yields the {100, unmuted} default via ControlOps.current().
 
         let initialControl = ControlOps.current()
@@ -1958,7 +1978,7 @@ enum LoudiniHelper {
 
     /// Remove atomic-write temp files orphaned by writers that were killed
     /// between write and rename. Only OUR naming pattern, and only files older
-    /// than a minute — younger ones may belong to a write still in flight.
+    /// than a minute: younger ones may belong to a write still in flight.
     private static func sweepStaleTempFiles() {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: configDir.path) else { return }

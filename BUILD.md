@@ -110,7 +110,9 @@ atomic-write helper, and both the LaunchAgent and the Stream Deck plugin ship th
   torn file but not a lost update: a per-app override written between another writer's read and its
   rename vanishes. Every Swift frontend wraps its RMW in an exclusive `flock(2)` on this file
   (`withControlLock` in `ControlFile.swift`). The Node plugin has no `flock(2)`, so it never writes
-  `control.json` itself: each key press runs the bundled CLI, which takes the lock. See `DECISIONS.md`.
+  `control.json` itself: each key press runs the bundled CLI, which takes the lock. The wait is bounded:
+  a writer still blocked after about 0.5 s logs a warning and writes without the lock, so a stopped
+  holder cannot freeze the daemon. See `DECISIONS.md`.
   `brightness.lock` plays the same role for `brightness.json`.
 - **All writes to `control.json` MUST be atomic** (write a temp file in the same dir, then `rename()`),
   because up to three frontends may write it concurrently and the daemon reads it mid-write. This is the

@@ -1,4 +1,4 @@
-// StatusWatcher.swift — watches the daemon's status.json (ground truth) with a
+// StatusWatcher.swift: watches the daemon's status.json (ground truth) with a
 // light 200 ms poll. A poll beats a file-system event source here: every atomic
 // write replaces the inode, which silently detaches vnode-based sources.
 
@@ -15,7 +15,7 @@ final class StatusWatcher {
     private var lastPid: pid_t = 0
     private let onChange: (Status?) -> Void
 
-    /// `onChange` is called on the main queue — immediately after start() with
+    /// `onChange` is called on the main queue: immediately after start() with
     /// the initial state, then on every change (from ANY frontend).
     init(onChange: @escaping (Status?) -> Void) {
         self.onChange = onChange

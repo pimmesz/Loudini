@@ -28,7 +28,7 @@ fi
 
 # Escape the paths for XML (& < >) and then for the sed replacement (\ & |),
 # render to a temp file IN THE DESTINATION DIR (same filesystem -> atomic mv),
-# and lint BEFORE touching the destination — a path that breaks the XML must
+# and lint BEFORE touching the destination: a path that breaks the XML must
 # not clobber a working plist.
 esc() {
   printf '%s' "$1" \
@@ -55,7 +55,7 @@ cat <<'EOF'
 
 Loudini daemon installed and started (it now survives logout/reboot).
 
-FIRST RUN: macOS will ask for the "System Audio Recording" permission —
+FIRST RUN: macOS will ask for the "System Audio Recording" permission:
 System Settings -> Privacy & Security -> Screen & System Audio Recording.
 Loudini captures app audio only to re-render it at your chosen volume;
 nothing is recorded or stored. Until you grant it, the daemon retries

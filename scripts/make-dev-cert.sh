@@ -16,7 +16,7 @@ keychain="${HOME}/Library/Keychains/login.keychain-db"
 # Idempotent by design: a second leaf would change the designated requirement and break the very
 # grants this script exists to keep, so having one already is success, not an error.
 if security find-identity -p codesigning 2>/dev/null | grep -q "Loudini Dev"; then
-  echo "\"Loudini Dev\" is already in your keychain — nothing to do."
+  echo "\"Loudini Dev\" is already in your keychain: nothing to do."
   exit 0
 fi
 
@@ -64,9 +64,9 @@ echo "minting a self-signed code-signing cert…"
 security import "${work}/ident.p12" -k "${keychain}" -P loudini -T /usr/bin/codesign
 
 echo
-echo "done — \"Loudini Dev\" is in your keychain."
+echo "done: \"Loudini Dev\" is in your keychain."
 echo "It lists as CSSMERR_TP_NOT_TRUSTED (self-signed); that is expected and codesign still uses it."
-echo "The first build may ask for keychain access — that is codesign using the key; pick Always Allow."
+echo "The first build may ask for keychain access: that is codesign using the key; pick Always Allow."
 echo
 echo "Your old ad-hoc grants are stale, so clear them once and re-approve on next launch:"
 echo "  tccutil reset Accessibility gg.pim.loudini.menubar"

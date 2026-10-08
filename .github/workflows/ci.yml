@@ -2,13 +2,13 @@ name: ci
 
 # Compile-check on every code push/PR so a broken main is caught before a release is
 # ever cut. No secrets needed: the app is ad-hoc signed here (build-app.sh falls back
-# automatically), which is all a build check requires — releases are built, Developer-ID
+# automatically), which is all a build check requires: releases are built, Developer-ID
 # signed and notarized LOCALLY via scripts/release.sh. Fork PRs cannot access secrets on
 # GitHub, and this workflow needs none, so contributions build safely.
 on:
   # NOTE: paths-ignore means a docs-only / Markdown-only change won't start this
-  # workflow — so do NOT make the app/plugin jobs *required* status checks while
-  # this filter is here, or a docs-only PR hangs forever at "Expected — waiting for
+  # workflow, so do NOT make the app/plugin jobs *required* status checks while
+  # this filter is here, or a docs-only PR hangs forever at "Expected: waiting for
   # status" (GitHub's path-filter + required-check trap). Fine as-is with no branch
   # protection; if you add required checks, drop paths-ignore or add an always-pass gate.
   push:
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   app:
-    # Apple Silicon runner with an SDK >= 14.4 — the daemon uses the 14.4-only
+    # Apple Silicon runner with an SDK >= 14.4: the daemon uses the 14.4-only
     # Core Audio process-tap APIs (CATapDescription/AudioHardwareCreateProcessTap).
     runs-on: macos-15
     steps:

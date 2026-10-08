@@ -6,7 +6,7 @@ menubar/AppIcon.iconset/
 # release build output (Loudini.dmg / Loudini.zip)
 dist/
 
-# pnpm project — npm lockfiles must never be committed
+# pnpm project: npm lockfiles must never be committed
 package-lock.json
 yarn.lock
 node_modules/

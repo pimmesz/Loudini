@@ -1,4 +1,4 @@
-// Regenerates docs/og.png — the 1200x630 share preview Slack/Discord/X/Reddit unfurl
+// Regenerates docs/og.png: the 1200x630 share preview Slack/Discord/X/Reddit unfurl
 // for loudini.app (run: swift make-og.swift).
 //
 // WHY a script and not a checked-in export: the repo has no design tool and no image

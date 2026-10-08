@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Write the version ONCE. Loudini's version lives in five places that must agree —
+# Write the version ONCE. Loudini's version lives in five places that must agree:
 # the app plist, the plugin's package.json + Stream Deck manifest, the landing-page
 # footer, and the CHANGELOG heading. Hand-editing five files is how they drift, and
 # scripts/preflight.sh fails the release when they do. This writes all five.
 #
 # Backups of every file go to a temp dir (printed before anything is rewritten, so the path
-# is known even when the bump fails halfway) — release.sh refuses to run on a dirty tree.
+# is known even when the bump fails halfway); release.sh refuses to run on a dirty tree.
 # Prepares the git commands; it never runs git itself.
 #
 # Usage: scripts/bump-version.sh 0.3.0
@@ -31,7 +31,7 @@ changelog="CHANGELOG.md"
 
 backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/loudini-bump-$(date +%Y%m%d-%H%M%S)-XXXXXX")"
 for f in "${plist}" "${pkg}" "${manifest}" "${site}" "${changelog}"; do
-  [[ -f "${f}" ]] || { echo "ERROR: ${f} is missing — cannot bump." >&2; exit 1; }
+  [[ -f "${f}" ]] || { echo "ERROR: ${f} is missing, cannot bump." >&2; exit 1; }
   cp "${f}" "${backup_dir}/${f//\//_}"
 done
 # Say this up front: everything below rewrites the tree, and a failure mid-way is exactly
@@ -46,7 +46,7 @@ rewrite() {
   mv "${file}.tmp" "${file}"
 }
 
-# The plist is the source of truth, and release.sh reads it with plistlib — so write it
+# The plist is the source of truth, and release.sh reads it with plistlib, so write it
 # with plistlib too rather than with a regex that could silently miss. sort_keys=False
 # keeps the existing key order, so a bump shows up as a one-line diff.
 python3 - "${plist}" "${version}" <<'PY'
@@ -70,7 +70,7 @@ rewrite "${site}" "s|&middot; v[0-9]+\.[0-9]+\.[0-9]+|\&middot; v${version}|"
 # CHANGELOG skeleton above the newest existing section. Skipped when the section already
 # exists, so re-running a bump can't produce two headings for one version.
 if grep -qF "## [${version}]" "${changelog}"; then
-  echo "note: ${changelog} already has a [${version}] section — left as-is."
+  echo "note: ${changelog} already has a [${version}] section, left as-is."
 else
   awk -v ver="${version}" -v today="$(date +%F)" '
     !inserted && /^## \[/ {
@@ -93,7 +93,7 @@ fi
 
 echo
 echo "Bumped to ${version}. Backups: ${backup_dir}"
-echo "Fill in the CHANGELOG section — release.sh's preflight rejects the TODO placeholder — then:"
+echo "Fill in the CHANGELOG section (release.sh's preflight rejects the TODO placeholder) then:"
 echo "  git add ${plist} ${pkg} ${manifest} ${site} ${changelog}"
 echo "  git commit -m \"chore(release): ${version}\""
 echo "  git push origin main"

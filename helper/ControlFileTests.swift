@@ -1,10 +1,10 @@
-// ControlFileTests.swift — contract regression tests for ControlFile.swift.
+// ControlFileTests.swift: contract regression tests for ControlFile.swift.
 //
 // ControlFile.swift is the one file linked into BOTH the daemon and the menu-bar app, and
 // it encodes the invariants BUILD.md calls non-negotiable: atomic writes, lenient parsing,
 // clamping, and telling the truth about a dead daemon. Nothing enforced any of them until
 // this file existed. It is pure Foundation file+JSON with no Core Audio, so it needs no
-// audio hardware and no TCC grants — plain `swiftc` is enough (see scripts/test.sh).
+// audio hardware and no TCC grants: plain `swiftc` is enough (see scripts/test.sh).
 //
 // Deliberately no XCTest and no SPM: this repo has no Package.swift and builds everything
 // with a bare swiftc line (menubar/build-app.sh), so a hand-rolled assert runner keeps the
@@ -21,7 +21,7 @@ private func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> Str
     checks += 1
     guard !ok else { return }
     let d = detail()
-    failures.append(d.isEmpty ? label : "\(label) — \(d)")
+    failures.append(d.isEmpty ? label : "\(label): \(d)")
 }
 
 /// Optional on both sides so a test can assert straight against a `readControl(...)?.x`
@@ -42,7 +42,7 @@ private func refuse(_ message: String) -> Never {
 ///
 /// The override must be CFFIXED_USER_HOME, not HOME. `configDir` (ControlFile.swift:14)
 /// comes from `homeDirectoryForCurrentUser`, which asks OS directory services and ignores
-/// $HOME entirely — a HOME override looks like it works and silently does nothing. It also
+/// $HOME entirely: a HOME override looks like it works and silently does nothing. It also
 /// has to be in the environment before this process starts: `configDir` is a lazily
 /// initialised global, so anything that reads it ahead of a setenv() freezes the real path.
 private func requireSandboxedHome() {
@@ -76,7 +76,7 @@ private func removeFixtures() {
 }
 
 /// A pid that is provably gone: run /usr/bin/true and wait for it to be reaped. readStatus's
-/// ESRCH branch needs a genuinely dead pid — a made-up number could hit a live process and
+/// ESRCH branch needs a genuinely dead pid: a made-up number could hit a live process and
 /// make the test pass or fail for the wrong reason.
 private func deadPID() -> Int {
     let p = Process()
@@ -98,7 +98,7 @@ private func testClampGain() {
 }
 
 private func testMultiplier() {
-    // A mute must be a hard zero, not a small gain — anything else leaks audio.
+    // A mute must be a hard zero, not a small gain: anything else leaks audio.
     checkEqual("muted master is silent", Control(gain: 100, muted: true).multiplier, 0)
     checkEqual("unmuted master scales", Control(gain: 50, muted: false).multiplier, 0.5)
     checkEqual("muted app is silent", AppOverride(gain: 100, muted: true).multiplier, 0)
@@ -250,7 +250,7 @@ private func testPerAppMutators() {
     checkEqual("setApp seeds default + clamps gain", a1.apps["com.x"], AppOverride(gain: 100, muted: false))
     checkEqual("setApp leaves master gain", a1.gain, 50)
 
-    // An empty bundle id is a no-op — there is nothing stable to target. Check on a fresh
+    // An empty bundle id is a no-op: there is nothing stable to target. Check on a fresh
     // control so "added no entry" shows as an empty map (setApp returns current() unchanged).
     removeFixtures()
     try! writeControl(Control(gain: 50, muted: false))
@@ -339,7 +339,7 @@ private func testReadStatusLiveDaemon() {
 }
 
 private func testReadStatusRoster() {
-    // running:false skips the liveness check, so the roster is parsed as written — which
+    // running:false skips the liveness check, so the roster is parsed as written, which
     // is how we exercise the roster parser without needing a live daemon.
     writeRaw(#"""
     {"running":false,"apps":[
@@ -399,7 +399,7 @@ private func testAtomicWriteLeavesNoResidue() {
         .filter { $0.hasSuffix(".tmp") }
     check("no .tmp residue after a successful write", leftovers.isEmpty, "found \(leftovers)")
 
-    // Overwriting must replace the file wholesale — a shorter payload must not leave the
+    // Overwriting must replace the file wholesale: a shorter payload must not leave the
     // tail of the longer one behind, which is the classic in-place-truncate bug.
     let inodeBefore = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.systemFileNumber] as? Int
     let shorter = Data(#"{"a":1}"#.utf8)
@@ -511,6 +511,41 @@ private func testDeviceLevels() {
     try? FileManager.default.removeItem(at: deviceLevelsURL)
 }
 
+// MARK: - waiting daemon gives up (Takeover.swift)
+
+private func testWaiterGiveUp() {
+    let a = ExecutableStamp(inode: 7, modified: 100)
+    checkEqual("same binary and parent keeps waiting",
+               waiterGiveUpReason(startStamp: a, nowStamp: a, startParent: 900, nowParent: 900), nil)
+    checkEqual("a rebuilt binary gives up",
+               waiterGiveUpReason(startStamp: a, nowStamp: ExecutableStamp(inode: 8, modified: 100),
+                                  startParent: 900, nowParent: 900), "its binary changed on disk")
+    checkEqual("a re-signed binary gives up",
+               waiterGiveUpReason(startStamp: a, nowStamp: ExecutableStamp(inode: 7, modified: 101),
+                                  startParent: 900, nowParent: 900), "its binary changed on disk")
+    checkEqual("a deleted binary gives up",
+               waiterGiveUpReason(startStamp: a, nowStamp: nil, startParent: 900, nowParent: 900),
+               "its binary changed on disk")
+    checkEqual("a dead parent gives up",
+               waiterGiveUpReason(startStamp: a, nowStamp: a, startParent: 900, nowParent: 1),
+               "its parent (pid 900) is gone")
+    checkEqual("a launchd waiter ignores its parent",
+               waiterGiveUpReason(startStamp: a, nowStamp: a, startParent: 1, nowParent: 1), nil)
+    checkEqual("an unreadable start binary only checks the parent",
+               waiterGiveUpReason(startStamp: nil, nowStamp: nil, startParent: 900, nowParent: 900), nil)
+
+    // The stamp must change when a file is replaced the way build-app.sh does it.
+    let url = configDir.appendingPathComponent("stamp-probe")
+    writeRaw("one", to: url)
+    let before = executableStamp(atPath: url.path)
+    check("a present file has a stamp", before != nil)
+    try? FileManager.default.removeItem(at: url)
+    writeRaw("two", to: url)
+    check("a replaced file has a new stamp", executableStamp(atPath: url.path) != before)
+    try? FileManager.default.removeItem(at: url)
+    checkEqual("a missing file has no stamp", executableStamp(atPath: url.path), nil)
+}
+
 // MARK: - control.lock
 
 /// Guards the lost-update fix: every read-modify-write must really hold control.lock.
@@ -576,6 +611,7 @@ struct ControlFileTests {
         testResolveAppTarget()
         testStallVerdict()
         testDeviceLevels()
+        testWaiterGiveUp()
         testAppEntryJSON()
 
         guard failures.isEmpty else {
@@ -583,6 +619,6 @@ struct ControlFileTests {
             for f in failures { FileHandle.standardError.write(Data("  x \(f)\n".utf8)) }
             exit(1)
         }
-        print("ok — \(checks) contract checks passed")
+        print("ok: \(checks) contract checks passed")
     }
 }

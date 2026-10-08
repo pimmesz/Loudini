@@ -1,6 +1,6 @@
 name: preflight
 
-# Version-agreement check on EVERY push/PR — deliberately its own workflow rather than a
+# Version-agreement check on EVERY push/PR: deliberately its own workflow rather than a
 # job in ci.yml. paths-ignore is workflow-level in GitHub Actions, and ci.yml ignores
 # 'docs/**' and '**/*.md' (see the trap note there); but two of the five version homes
 # preflight guards ARE those paths (docs/index.html, CHANGELOG.md). A preflight job inside

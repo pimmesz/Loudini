@@ -1,4 +1,4 @@
-// HUDWindow.swift — transient on-screen volume overlay, in the spirit of the
+// HUDWindow.swift: transient on-screen volume overlay, in the spirit of the
 // native macOS HUD we suppress: borderless, click-through, never steals focus,
 // fades out ~1 s after the last change. Driven off status.json changes, so it
 // reacts to EVERY frontend (keys, CLI, Stream Deck, slider).
@@ -66,7 +66,7 @@ final class HUDWindow {
              value: gain, dimmedBar: muted)
     }
 
-    /// Brightness variant — same panel, sun icon.
+    /// Brightness variant: same panel, sun icon.
     func show(brightnessPercent: Int) {
         show(symbol: brightnessPercent <= 33 ? "sun.min.fill" : "sun.max.fill",
              text: "Brightness \(brightnessPercent)%",

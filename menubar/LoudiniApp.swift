@@ -1,8 +1,8 @@
-// LoudiniApp.swift — the Loudini menu-bar app: grabs the hardware volume keys
+// LoudiniApp.swift: the Loudini menu-bar app. It grabs the hardware volume keys
 // (VolumeKeyTap), shows the live level in the menu bar + a dropdown slider, and
 // pops a HUD on every level change (HUDWindow). All state comes from the
 // daemon's status.json; all changes go through the shared atomic control.json
-// writers in helper/ControlFile.swift — the exact code the CLI uses.
+// writers in helper/ControlFile.swift: the exact code the CLI uses.
 //
 // Build: menubar/build-app.sh (bundles the daemon into Loudini.app).
 
@@ -23,7 +23,7 @@ enum LoudiniMain {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private static let step = 6  // % per key press — matches the CLI and Stream Deck
+    private static let step = 6  // % per key press: matches the CLI and Stream Deck
     private static let fineStep = 1  // % per key press when Shift is held (small adjust)
     private static let volumeSliderTip = "Tip: hold Shift while you press a volume key to change the volume by 1%."
 
@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Live row views keyed by roster row key (bundle id, or a pid-scoped key for
     /// bundle-less sources). Reused across renders so a drag survives a gain echo.
     private var appRows: [String: AppRowViews] = [:]
-    /// The ordered row keys currently shown — a cheap structural-change check.
+    /// The ordered row keys currently shown: a cheap structural-change check.
     private var shownAppKeys: [String] = []
 
     private struct AppRowViews {
@@ -110,13 +110,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isCaptureRivalRunning = false
     /// The Accessibility repair ran this session; only then offer the Settings pane too.
     private var didAttemptAXFix = false
-    /// Last (gain, muted) seen running — HUD fires only when the level moves.
+    /// Last (gain, muted) seen running: HUD fires only when the level moves.
     private var lastLevel: (gain: Int, muted: Bool)?
 
     /// Control writes happen off the main thread (tap callback + UI must not block on IO).
     private let writeQueue = DispatchQueue(label: "gg.pim.loudini.menubar.write", qos: .userInitiated)
 
-    /// The running build's version, straight from Info.plist. Never hardcoded —
+    /// The running build's version, straight from Info.plist. Never hardcoded:
     /// troubleshooting a stale permission grant depends on knowing which build
     /// this is. Falls back to 0.0.0 only when run unbundled (no Info.plist).
     private static let appVersion =
@@ -130,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }()
 
-    /// Loudini's mark: four rounded level bars — a volume-control glyph that
+    /// Loudini's mark: four rounded level bars, a volume-control glyph that
     /// reads at 16px, distinct from Apple's stock speaker. (x, height) on an
     /// 18-pt box; each bar 2.4 wide, centred vertically.
     private static let barSpecs: [(CGFloat, CGFloat)] = [(2.4, 5), (6.0, 11), (9.6, 8), (13.2, 4.5)]
@@ -154,7 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
 
     /// Muted variant: the bars with a crossed-out slash (a knockout gap keeps
-    /// the slash legible over them). Monochrome template — mute reads the same
+    /// the slash legible over them). Monochrome template: mute reads the same
     /// in both icon modes, and never as a jarring colour emoji.
     private static let levelBarsMutedIcon: NSImage = {
         let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
@@ -233,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupKeyTap(promptIfNeeded: true)
         startKeyTapWatchdog()
 
-        // Displays come and go — re-enumerate the DDC targets when they do.
+        // Displays come and go: re-enumerate the DDC targets when they do.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
@@ -324,7 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // Volume row, Sound-menu style: quiet icon — slider — loud icon.
+        // Volume row, Sound-menu style: quiet icon, slider, loud icon.
         let sliderItem = NSMenuItem()
         let row = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 30))
         let quiet = NSImageView(frame: NSRect(x: 14, y: 8, width: 14, height: 14))
@@ -474,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(updateCheckItem)
 
         // Shown only when GitHub reports a strictly newer release; clicking it
-        // opens the releases page — Loudini never downloads or installs itself.
+        // opens the releases page: Loudini never downloads or installs itself.
         updateItem = NSMenuItem(title: "", action: #selector(updateClicked), keyEquivalent: "")
         updateItem.target = self
         updateItem.toolTip = "Opens the download page. Open the new Loudini.dmg and drag Loudini "
@@ -491,8 +491,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return menu
     }
 
-    /// The first running app known to fight with Loudini, or nil. Which apps those are —
-    /// and what to tell the user about each — lives in helper/Conflicts.swift, the same
+    /// The first running app known to fight with Loudini, or nil. Which apps those are,
+    /// and what to tell the user about each, lives in helper/Conflicts.swift, the same
     /// list `loudini doctor` checks, so the two never give conflicting advice.
     private func runningRival() -> String? {
         let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.localizedName })
@@ -500,7 +500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        // Runs BEFORE the menu is on screen, so growing it here is safe — and it
+        // Runs BEFORE the menu is on screen, so growing it here is safe, and it
         // must happen before isMenuOpen, which suppresses exactly that.
         showCachedUpdate()
         isMenuOpen = true
@@ -523,7 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // Re-read control.json on open so overrides added/cleared from the CLI
         // for a *silent* app (which never moves status.json, so statusChanged
-        // wouldn't fire) are reflected — chiefly the "Reset App Volumes" row's
+        // wouldn't fire) are reflected, chiefly the "Reset App Volumes" row's
         // visibility, which is driven by control.json, not the roster.
         renderApps(lastApps, hasOverrides: !ControlOps.current().apps.isEmpty)
         // A machine that never restarts would otherwise never check again.
@@ -533,7 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: status.json -> UI (the visual layer; reacts to changes from ANY frontend)
 
     // Compute the "Output: …" menu row's (title, enabled, tooltip) from plain values in one
-    // exhaustive switch — no force-unwraps, one assignment site instead of a 4-way if/else.
+    // exhaustive switch: no force-unwraps, one assignment site instead of a 4-way if/else.
     private func updateDeviceItem(running: Bool, pipelineOK: Bool, reason: String, device: String,
                                   daemonVersion: String) {
         let title: String, enabled: Bool, toolTip: String?
@@ -605,7 +605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         // HUD only when the level actually moved AND audio is actually being
-        // rendered — never fake feedback for a dead pipeline.
+        // rendered: never fake feedback for a dead pipeline.
         if lastPipelineOK, let last = lastLevel, last != (gain, muted) {
             hud.show(gain: gain, muted: muted)
         }
@@ -669,9 +669,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// A per-row key that's stable across roster refreshes. The daemon collapses
     /// each bundle to ONE roster entry keyed by bundle id, so bundle-ful apps key
-    /// by bundle id alone — folding the pid in would flap when a background helper
+    /// by bundle id alone: folding the pid in would flap when a background helper
     /// (e.g. a Chrome renderer) churns and tear out a row mid-drag. Bundle-less
-    /// sources (empty "") have no stable id, so they still scope by pid — the
+    /// sources (empty "") have no stable id, so they still scope by pid; the
     /// daemon keys them the same way, so they can't collide either.
     private static func rowKey(_ a: AppEntry) -> String {
         a.bundleID.isEmpty ? "pid:\(a.pid)" : a.bundleID
@@ -691,14 +691,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let keys = apps.map(Self.rowKey)
         if keys == shownAppKeys {
             // Rows are invisible while the menu is closed, and StatusWatcher fires ~5x/s
-            // during a ramp — skip the per-row icon/label refresh until the menu is on
+            // during a ramp: skip the per-row icon/label refresh until the menu is on
             // screen. menuWillOpen sets isMenuOpen then re-renders, so an open menu is current.
             if isMenuOpen {
                 for a in apps { updateAppRow(appRows[Self.rowKey(a)], a) }
             }
             return
         }
-        // Structure changed — tear the old rows out and rebuild in roster order,
+        // Structure changed: tear the old rows out and rebuild in roster order,
         // inserting just above the reset item.
         for row in appRows.values { menu.removeItem(row.item) }
         appRows.removeAll()
@@ -738,7 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         slider.frame = NSRect(x: 40, y: 2, width: 226, height: 20)
 
         // Bundle id rides on the controls so the action knows which app to write.
-        // Bundle-less sources can't be targeted (no stable key) — disable them.
+        // Bundle-less sources can't be targeted (no stable key): disable them.
         let addressable = !a.bundleID.isEmpty
         slider.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
         mute.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
@@ -764,7 +764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         row.slider.setAccessibilityLabel("\(a.name) volume")
         // Dim a lingering (idle) app so the live ones read first.
         row.name.textColor = a.active ? .labelColor : .secondaryLabelColor
-        // pid_t(exactly:) — never trap on an out-of-range pid; nil falls back.
+        // pid_t(exactly:), never trap on an out-of-range pid; nil falls back.
         row.icon.image = NSRunningApplication(processIdentifier: pid_t(exactly: a.pid) ?? -1)?.icon
             ?? NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil)
         // Don't fight the user's hand: skip the echo while this slider is dragged.
@@ -829,7 +829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// True when the built-in panel is active — macOS should keep the
+    /// True when the built-in panel is active: macOS should keep the
     /// brightness keys then; Loudini only owns them for external-only setups.
     private static func builtInDisplayActive() -> Bool {
         NSScreen.screens.contains { screen in
@@ -858,20 +858,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Only own the keys while audio is actually under our control;
             // otherwise pass them to macOS so its native (crossed-out) HUD
             // gives an honest "this does nothing" signal. Both closures run
-            // on the main run loop — no race.
+            // on the main run loop: no race.
             tap.shouldConsume = { [weak self] in
                 guard let self else { return false }
                 return self.lastStatusRunning && self.lastPipelineOK
             }
             // Brightness is owned solely by the HID listener (BrightnessKeyListener):
-            // in the only case Loudini drives brightness — external DDC display, no
-            // built-in — macOS never emits the NX brightness event anyway, so routing
+            // in the only case Loudini drives brightness (external DDC display, no
+            // built-in), macOS never emits the NX brightness event anyway, so routing
             // it here too would just double-nudge on the rare setup where it does fire.
             // Leave shouldConsumeBrightness at its default (false): the NX tap is volume-only.
             if tap.start() {
                 keyTap = tap
             } else {
-                NSLog("Loudini: event tap creation failed despite Accessibility trust — watchdog will retry")
+                NSLog("Loudini: event tap creation failed despite Accessibility trust, watchdog will retry")
             }
         }
         // If not trusted: degrade gracefully (menu + slider keep working);
@@ -887,7 +887,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let trusted = AXIsProcessTrusted()
             if trusted { UserDefaults.standard.set(true, forKey: "wasEverAXTrusted") }
             if self.wantsKeyGrab, let tap = self.keyTap, !trusted || !tap.isEnabled {
-                NSLog("Loudini: key tap lost (trusted=%d, enabled=%d) — rebuilding",
+                NSLog("Loudini: key tap lost (trusted=%d, enabled=%d), rebuilding",
                       trusted ? 1 : 0, tap.isEnabled ? 1 : 0)
                 tap.stop()
                 self.keyTap = nil
@@ -1002,8 +1002,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// no query params, no cookies: GitHub sees only the IP address the request comes from.
     /// We set User-Agent to a bare "Loudini" deliberately: GitHub rejects a request
     /// without one (403), and CFNetwork's default would otherwise announce the exact
-    /// Darwin kernel build — this sends strictly less.
-    /// Any failure is silent on purpose — a menu-bar utility must not nag.
+    /// Darwin kernel build: this sends strictly less.
+    /// Any failure is silent on purpose: a menu-bar utility must not nag.
     private func checkForUpdate() {
         guard wantsUpdateCheck else { return }
         let lastCheck = UserDefaults.standard.double(forKey: "lastUpdateCheck")
@@ -1039,7 +1039,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !isQuitting else { return }
         let shouldShow = wantsUpdateCheck && Self.isNewer(tag, than: Self.appVersion)
         if shouldShow { updateItem.title = "Download Update (\(tag))…" }
-        // Never change the menu's HEIGHT while it is on screen — in either
+        // Never change the menu's HEIGHT while it is on screen, in either
         // direction. A reply landing mid-click would shift every row below it,
         // including Quit, under the pointer. The tag is cached, so the next open
         // reflects whatever this check found.
@@ -1134,7 +1134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             if Self.isDaemonAlive() { return }
             if hasAgent {
-                // The user installed the LaunchAgent — revive it rather than
+                // The user installed the LaunchAgent: revive it rather than
                 // spawning our own: kickstart restarts a loaded job, bootstrap
                 // covers "plist present but never loaded".
                 if Self.runLaunchctl(["kickstart", "gui/\(getuid())/gg.pim.loudini"]) != 0 {
@@ -1143,10 +1143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // A plist pointing at a moved/deleted binary makes both calls
                 // useless (or "succeed" into a job that can never run). Probe
                 // once after a grace period and fall back to our bundled
-                // daemon — the flock arbitrates if the agent comes up too.
+                // daemon: the flock arbitrates if the agent comes up too.
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
                     guard !Self.isDaemonAlive() else { return }
-                    NSLog("Loudini: LaunchAgent did not produce a daemon — falling back to the bundled one")
+                    NSLog("Loudini: LaunchAgent did not produce a daemon, falling back to the bundled one")
                     DispatchQueue.main.async {
                         guard let self, !self.isQuitting else { return }
                         if let d = self.daemon, d.isRunning { return }
@@ -1205,7 +1205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let url = Bundle.main.executableURL!.deletingLastPathComponent()
             .appendingPathComponent("loudini-helper")
         guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            NSLog("Loudini: bundled daemon missing at %@ — run menubar/build-app.sh", url.path)
+            NSLog("Loudini: bundled daemon missing at %@, run menubar/build-app.sh", url.path)
             return
         }
         let p = Process()
@@ -1238,12 +1238,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let url = configDir.appendingPathComponent("daemon.log")
         try? ensureConfigDir()
         // Rotate here, before the open: a daemon already holds its log open, so it
-        // cannot rotate its own file. One old generation is kept.
+        // cannot rotate its own file. One old generation is kept. Copy then truncate,
+        // not rename: other daemons (launchd's, a waiting one) keep their O_APPEND
+        // handle, and a rename would leave them writing into daemon.log.1.
         if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
            size > 1_000_000 {
             let old = configDir.appendingPathComponent("daemon.log.1")
             try? FileManager.default.removeItem(at: old)
-            try? FileManager.default.moveItem(at: url, to: old)
+            if (try? FileManager.default.copyItem(at: url, to: old)) != nil { truncate(url.path, 0) }
         }
         // O_APPEND so every write atomically lands at EOF. launchd opens this same
         // daemon.log O_APPEND for its agent daemon; a fixed-offset FileHandle

@@ -3,7 +3,7 @@
   "Name": "Loudini",
   "Version": "0.5.0.0",
   "Author": "pim",
-  "Description": "A software output volume for audio interfaces that have no OS volume of their own (e.g. Focusrite Scarlett). Uses a driverless macOS 14.4+ audio tap — no Background Music, no driver, no admin.",
+  "Description": "A software output volume for audio interfaces that have no OS volume of their own (e.g. Focusrite Scarlett). Uses a driverless macOS 14.4+ audio tap: no Background Music, no driver, no admin.",
   "Category": "Loudini",
   "CodePath": "bin/plugin.js",
   "Icon": "imgs/plugin/marketplace",

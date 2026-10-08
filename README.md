@@ -141,9 +141,9 @@ If `~/.local/bin` is not already on your `PATH`, add `export PATH="$HOME/.local/
 shell profile. `install-cli.sh` prints the same note when it needs to.
 
 ```
-loudini up [step]     volume += step (default 6), un-mutes
-loudini down [step]   volume -= step (default 6), un-mutes
-loudini mute          toggle mute
+loudini up [step]     volume += step (default 6), un-mutes, prints: gain=48 muted=false
+loudini down [step]   volume -= step (default 6), un-mutes, prints the new level
+loudini mute          toggle mute, prints the new level
 loudini set <0-100>   set the volume
 loudini get           print: gain=42 muted=false running=true pipeline=true device="Scarlett 2i2 USB"
 loudini apps          list apps currently producing audio (from status.json)
@@ -196,7 +196,8 @@ the first:
   rename. The rename stops a torn file but not a lost update: a per-app override written between
   another writer's read and its rename disappears without the lock. Every first-party frontend takes
   it; the Stream Deck plugin does so by running the bundled CLI for each key press, because Node has
-  no `flock(2)`. See `DECISIONS.md`.
+  no `flock(2)`. The wait is bounded: after about 0.5 s a writer logs a warning and goes ahead without
+  the lock. See `DECISIONS.md`.
 - `status.json`, written by the daemon on every change:
   - `gain`, `muted`: the applied level.
   - `running`: daemon alive (`false` after a clean shutdown). Readers should also probe `pid`:

@@ -1,6 +1,6 @@
 // Regenerates AppIcon.icns from AppIcon.svg (run: swift make-appicon.swift).
 // Uses NSImage's native SVG support, so the SVG must stick to the basic
-// shapes/gradients subset — no filters, masks, text, or CSS.
+// shapes/gradients subset: no filters, masks, text, or CSS.
 import AppKit
 
 let here = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
@@ -34,7 +34,7 @@ render(128, "icon_128x128.png");  render(256, "icon_128x128@2x.png")
 render(256, "icon_256x256.png");  render(512, "icon_256x256@2x.png")
 render(512, "icon_512x512.png");  render(1024, "icon_512x512@2x.png")
 
-// Status-item version (18 pt @2x) — shown next to the live level in the menu bar.
+// Status-item version (18 pt @2x): shown next to the live level in the menu bar.
 render(36, "menubar.png")
 try? FileManager.default.removeItem(at: here.appendingPathComponent("MenuBarIcon.png"))
 try! FileManager.default.copyItem(at: iconset.appendingPathComponent("menubar.png"),

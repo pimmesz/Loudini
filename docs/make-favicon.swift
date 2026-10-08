@@ -33,7 +33,7 @@ func render(_ side: CGFloat, to url: URL) {
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = ctx
 
-    // AppKit's origin is bottom-left, the SVG's is top-left — flip y as we go.
+    // AppKit's origin is bottom-left, the SVG's is top-left: flip y as we go.
     func rect(_ x: CGFloat, _ top: CGFloat, _ w: CGFloat, _ h: CGFloat) -> NSRect {
         NSRect(x: x * s, y: (1024 - top - h) * s, width: w * s, height: h * s)
     }

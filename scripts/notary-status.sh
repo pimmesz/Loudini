@@ -6,7 +6,7 @@
 #   scripts/notary-status.sh                 # recent submissions + their verdicts
 #   scripts/notary-status.sh --watch         # same, re-polled every 60s (Ctrl-C to stop)
 #   scripts/notary-status.sh <submission-id> # one submission's status
-#   scripts/notary-status.sh <submission-id> log   # Apple's log — WHY it was Invalid
+#   scripts/notary-status.sh <submission-id> log   # Apple's log: WHY it was Invalid
 #
 # Auth: the 'loudini' notarytool keychain profile by default (NOTARY_PROFILE=... to
 # override), or NOTARY_APPLE_ID / NOTARY_TEAM_ID / NOTARY_APP_PW.

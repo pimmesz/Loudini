@@ -30,12 +30,12 @@ export interface Log {
 let child: ChildProcess | undefined;
 
 /**
- * Start the audio daemon if it isn't already alive (idempotent — safe to call on every key event).
+ * Start the audio daemon if it isn't already alive (idempotent: safe to call on every key event).
  * The daemon's tap fails OPEN: if it dies, macOS restores the interface's own audio, so a crash is
  * recoverable, not catastrophic. We respawn lazily on the next action rather than tight-looping.
  */
 export function ensureHelper(log: Log): void {
-  // exitCode stays null when a child dies from a SIGNAL — check both fields,
+  // exitCode stays null when a child dies from a SIGNAL: check both fields,
   // or a crashed helper would never be respawned.
   if (child && child.exitCode === null && child.signalCode === null) return; // still alive
   if (!existsSync(HELPER)) {
@@ -50,14 +50,15 @@ export function ensureHelper(log: Log): void {
   const pid = child.pid;
   child.on('exit', (code, signal) => {
     // Drop the handle so the next ensureHelper respawns instead of treating a
-    // dead child as alive. A spawn made while another daemon runs does not exit:
-    // it waits on daemon.lock and takes over when that daemon goes away.
+    // dead child as alive. A spawn made while another daemon runs waits on
+    // daemon.lock and takes over when that daemon goes away, unless its binary
+    // changes on disk first (then it exits 0 and the next action respawns it).
     child = undefined;
     if (code !== 0) log.error(`Loudini: helper pid ${pid} exited (${code ?? `signal ${signal}`}); respawns on next action.`);
   });
   child.on('error', (err) => {
     // A spawn failure emits 'error' with NO following 'exit', so exitCode and
-    // signalCode both stay null — the liveness guard would read that as alive
+    // signalCode both stay null: the liveness guard would read that as alive
     // and never retry. Clear the handle so the next action respawns.
     child = undefined;
     log.error(`Loudini: helper failed to start: ${err.message}`);
@@ -66,15 +67,16 @@ export function ensureHelper(log: Log): void {
 
 /** Verbs run one at a time in press order: control.lock stops two writes from overlapping,
  * but not Up-then-Mute from landing as Mute-then-Up (which would leave audio unmuted). */
-let verbQueue: Promise<void> = Promise.resolve();
+let verbQueue: Promise<unknown> = Promise.resolve();
 
 /** Apply a volume verb (`up 6`, `down 6`, `mute`) through the bundled CLI. It takes
- * control.lock like every Swift writer, which Node cannot do itself (no flock). */
-export function runVerb(args: string[]): Promise<void> {
+ * control.lock like every Swift writer, which Node cannot do itself (no flock).
+ * Resolves with the CLI's stdout, which names the resulting level. */
+export function runVerb(args: string[]): Promise<string> {
   const run = verbQueue.then(
     () =>
-      new Promise<void>((resolve, reject) => {
-        execFile(HELPER, args, { timeout: 5000 }, (err) => (err ? reject(err) : resolve()));
+      new Promise<string>((resolve, reject) => {
+        execFile(HELPER, args, { timeout: 5000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
       }),
   );
   // The next verb waits for this one whether it succeeded or failed.

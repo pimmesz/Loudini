@@ -18,7 +18,7 @@ await build({
   format: 'esm',
   target: 'node20',
   // Minify the shipped bundle. Besides size, it strips esbuild's module-path
-  // comments and mangles the CommonJS registry keys — which, because the working
+  // comments and mangles the CommonJS registry keys, which, because the working
   // dir is the temp dir (below), would otherwise embed the maintainer's absolute
   // home path (../../Users/<name>/…) in plugin.js on every user's machine.
   minify: true,

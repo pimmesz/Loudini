@@ -1,4 +1,4 @@
-// DDC.swift — external-monitor brightness over DDC/CI (Apple Silicon), for the
+// DDC.swift: external-monitor brightness over DDC/CI (Apple Silicon), for the
 // CLI. Pure IOKit + Foundation (no AppKit), so it links into loudini-helper.
 //
 // DDC writes need NO permission (unlike key capture), which is the whole point:
@@ -61,7 +61,7 @@ enum DDC {
     }
 
     /// Hold an exclusive cross-process lock for a brightness read-modify-write,
-    /// so overlapping `loudini brightness` invocations (a held/autorepeated key —
+    /// so overlapping `loudini brightness` invocations (a held/autorepeated key,
     /// the marketed hotkey path) don't collapse steps or drive concurrent I2C to
     /// the same chip. Fail-open: proceed unlocked if the lock can't be taken.
     private static func withLock<T>(_ body: () -> T) -> T {
@@ -74,7 +74,7 @@ enum DDC {
     }
 
     /// Like withLock but NON-blocking: returns nil instead of waiting when the
-    /// lock is already held. Used only for relative nudges — a held/autorepeated
+    /// lock is already held. Used only for relative nudges: a held/autorepeated
     /// key spawns one process per repeat, and queuing them behind a slow
     /// per-display write piles up blocked processes. If another invocation holds
     /// the lock it's already moving brightness the same way, so skipping this
@@ -126,7 +126,7 @@ enum DDC {
         guard accepted else { return .writeFailed(lastError) }
         // Cache the level so a menu open reflects it instantly. atomicWrite (ControlFile.swift)
         // creates ~/.config/loudini if the CLI runs first on a fresh machine, and writes via a
-        // swept temp name + rename — the shared path every other ~/.config/loudini writer uses.
+        // swept temp name + rename: the shared path every other ~/.config/loudini writer uses.
         try? atomicWrite(
             JSONSerialization.data(withJSONObject: ["percent": pct], options: [.sortedKeys]),
             to: cacheURL)
@@ -137,7 +137,7 @@ enum DDC {
         // Whole read-modify-write under one NON-blocking lock. Base the step on
         // the cached last-set value (consistent under a held key), reading the
         // monitor only when there's no cache yet. If another invocation already
-        // holds the lock, skip rather than queue a blocked process — return the
+        // holds the lock, skip rather than queue a blocked process: return the
         // cached level so the caller still prints a sane value.
         if let outcome = tryWithLock({ applyUnlocked((cachedPercent() ?? currentUnlocked()) + delta) }) {
             return outcome

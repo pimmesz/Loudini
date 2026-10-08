@@ -1,7 +1,7 @@
-// DDCBrightness.swift — external-monitor brightness over DDC/CI (Apple Silicon).
+// DDCBrightness.swift: external-monitor brightness over DDC/CI (Apple Silicon).
 //
 // Talks to every external display's DCPAVServiceProxy via the IOAVService I2C
-// interface (private but long-stable — the same path MonitorControl and m1ddc
+// interface (private but long-stable: the same path MonitorControl and m1ddc
 // use) and writes VCP 0x10 (luminance). No daemon: the monitor itself holds the
 // true level, mirrored into ~/.config/loudini/brightness.json under
 // brightness.lock so `loudini brightness` (helper/DDC.swift) steps from the same
@@ -28,7 +28,7 @@ final class DDCBrightness {
     /// some monitors; writes are reliable). Only mutated on `queue`.
     private var percentValue = 50
 
-    /// Serialized DDC IO — concurrent I2C transactions corrupt each other.
+    /// Serialized DDC IO: concurrent I2C transactions corrupt each other.
     private let queue = DispatchQueue(label: "gg.pim.loudini.menubar.ddc", qos: .userInitiated)
 
     /// Main-thread mirrors for the UI (menu row visibility, slider position).
@@ -63,7 +63,7 @@ final class DDCBrightness {
                 self.isAvailable = available
                 self.percent = p
                 // Reseed the step base from the real monitor level only if no user
-                // brightness command landed while we were reading — else we'd revert it.
+                // brightness command landed while we were reading: else we'd revert it.
                 if self.targetGeneration == genAtStart { self.targetPercent = p }
                 done?()
             }
@@ -90,7 +90,7 @@ final class DDCBrightness {
         scheduleApply(done: done)
     }
 
-    /// percent = value (clamped 0-100). Rapid calls (slider drag) coalesce —
+    /// percent = value (clamped 0-100). Rapid calls (slider drag) coalesce:
     /// DDC writes are slow, so stale intermediate targets are dropped.
     func set(_ value: Int, done: @escaping (Int) -> Void) {
         targetPercent = clampGain(value)
@@ -110,7 +110,7 @@ final class DDCBrightness {
 
     /// Hold the same cross-process brightness.lock the CLI (helper/DDC.swift)
     /// takes, so a menu-bar slider/key write and a `loudini brightness` write
-    /// never drive concurrent I2C to the same chip — which corrupts the DDC
+    /// never drive concurrent I2C to the same chip, which corrupts the DDC
     /// transaction. Fail-open: proceed unlocked if the lock can't be taken.
     private func withBrightnessLock(_ body: () -> Void) {
         try? ensureConfigDir()
@@ -153,7 +153,7 @@ final class DDCBrightness {
         }
     }
 
-    // MARK: DDC/CI over I2C (chip 0x37, register 0x51) — on `queue` only
+    // MARK: DDC/CI over I2C (chip 0x37, register 0x51), on `queue` only
 
     private func rediscoverLocked() {
         services = []

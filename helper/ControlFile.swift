@@ -1,4 +1,4 @@
-// ControlFile.swift — the Loudini control-file contract, shared by every Swift frontend
+// ControlFile.swift: the Loudini control-file contract, shared by every Swift frontend
 // (the loudini-helper daemon/CLI and the menu-bar app; plugin/src/control.ts mirrors it in TS).
 //
 // control.json: {"gain": <int 0-100>, "muted": <bool>,
@@ -64,7 +64,7 @@ struct Status: Equatable {
     /// Recording permission is missing or no output device is available.
     var pipeline: Bool
     var device: String
-    /// Additive: why the pipeline is down — "" (up), "no-device", or error text.
+    /// Additive: why the pipeline is down. "" (up), "no-device", or error text.
     var reason: String
     /// Additive: the live roster of apps currently producing audio (or lingering
     /// in the anti-flicker grace window). Empty when nothing is playing or the
@@ -110,7 +110,7 @@ func readControl(previous: Control) -> Control? {
 ///
 /// Truthful even after a hard kill: the daemon stamps its pid, and if that
 /// process is provably gone (ESRCH) the file's running/pipeline claims are
-/// overridden to false — a SIGKILLed daemon can't strand a running:true file.
+/// overridden to false: a SIGKILLed daemon can't strand a running:true file.
 func readStatus() -> Status? {
     guard let data = try? Data(contentsOf: statusURL),
           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
@@ -124,7 +124,7 @@ func readStatus() -> Status? {
         pipeline = false
         deadDaemon = true
     }
-    // A provably-dead daemon can't have a live roster — drop it rather than show
+    // A provably-dead daemon can't have a live roster: drop it rather than show
     // a stale "what's playing" list from a status file nobody is updating.
     let apps = deadDaemon ? [] : parseApps(obj["apps"])
     return Status(gain: clampGain((obj["gain"] as? NSNumber)?.intValue ?? 100),
@@ -142,10 +142,10 @@ func readStatus() -> Status? {
 private func parseApps(_ raw: Any?) -> [AppEntry] {
     guard let rows = raw as? [Any] else { return [] }
     // compactMap so a single malformed element drops only that row, not the
-    // entire roster — true lenient parse.
+    // entire roster: true lenient parse.
     return rows.compactMap { row -> AppEntry? in
         guard let r = row as? [String: Any] else { return nil }
-        // Bound the pid to the valid pid_t range — an out-of-range value from a
+        // Bound the pid to the valid pid_t range: an out-of-range value from a
         // corrupt/hostile file would trap pid_t() at the menu-bar sink.
         let rawPid = (r["pid"] as? NSNumber)?.intValue ?? 0
         let pid = (0...Int(pid_t.max)).contains(rawPid) ? rawPid : 0
@@ -205,7 +205,7 @@ func writeControl(_ c: Control) throws {
 /// Hold an exclusive cross-process lock around a control.json read-modify-write,
 /// so overlapping writers (the daemon's publishGain, the CLI, and the menu-bar
 /// app) don't lose each other's updates. The atomic rename in writeControl stops
-/// a torn file but not a lost update — a per-app override set between another
+/// a torn file but not a lost update: a per-app override set between another
 /// writer's read and its rename would be silently dropped without this. Mirrors
 /// DDC.withLock (brightness.lock). Fail-open: proceed unlocked if the lock can't
 /// be opened, or is still held after about half a second.
@@ -216,9 +216,14 @@ func withControlLock<T>(_ body: () throws -> T) rethrows -> T {
     defer { close(fd) }   // closing releases the flock; the kernel also drops it on exit
     // Bounded wait: holders are short read-modify-writes, but one stopped mid-write
     // (SIGSTOP, a debugger) must not freeze the daemon's engine queue forever.
+    var isLocked = false
     for _ in 0..<100 {
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 { break }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { isLocked = true; break }
         usleep(5_000)
+    }
+    // Say so, because this write can now undo another writer's (DECISIONS.md 2026-10-08).
+    if !isLocked {
+        FileHandle.standardError.write(Data("loudini: control.lock still held after 0.5 s, writing control.json without it\n".utf8))
     }
     return try body()
 }
@@ -264,10 +269,10 @@ enum ControlOps {
         }
     }
 
-    // MARK: per-app overrides (Phase 3) — read-modify-write control.json's `apps`
+    // MARK: per-app overrides (Phase 3), read-modify-write control.json's `apps`
     // map, keyed by bundle id. Shared by the menu-bar rows and the `loudini app`
     // CLI so both write the exact same shape. An empty bundle id is a no-op
-    // (readControl ignores empty keys — there's nothing stable to target).
+    // (readControl ignores empty keys: there's nothing stable to target).
 
     @discardableResult
     static func setApp(_ bundleID: String, gain: Int) throws -> Control {
@@ -295,7 +300,7 @@ enum ControlOps {
         }
     }
 
-    /// "Reset all apps to 100%" — clears the whole `apps` map so every app rides
+    /// "Reset all apps to 100%": clears the whole `apps` map so every app rides
     /// master only again. Master gain/mute are untouched.
     @discardableResult
     static func resetApps() throws -> Control {

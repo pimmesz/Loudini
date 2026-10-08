@@ -1,4 +1,4 @@
-// BrightnessKeyListener.swift — HID-level brightness keys.
+// BrightnessKeyListener.swift: HID-level brightness keys.
 //
 // macOS only turns the brightness keys into NX media-key events when it has a
 // display whose brightness it can drive itself. With the lid closed on an
@@ -46,7 +46,7 @@ final class BrightnessKeyListener {
         guard manager == nil, Self.accessGranted else { return }
         let m = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         // Keyboards only. Matching every device tries to open the mic, Stream
-        // Deck, etc. — some are held exclusively by other apps, which fails the
+        // Deck, etc., and some are held exclusively by other apps, which fails the
         // whole open. The brightness keys are on a keyboard regardless.
         IOHIDManagerSetDeviceMatching(m, [
             kIOHIDDeviceUsagePageKey: 0x01,  // Generic Desktop
@@ -79,7 +79,7 @@ final class BrightnessKeyListener {
         guard opened == kIOReturnSuccess || opened == kIOReturnExclusiveAccess else {
             IOHIDManagerUnscheduleFromRunLoop(m, CFRunLoopGetMain(),
                                               CFRunLoopMode.commonModes.rawValue)
-            NSLog("Loudini: HID listener open failed (0x%x, Input Monitoring granted=%d) — watchdog will retry",
+            NSLog("Loudini: HID listener open failed (0x%x, Input Monitoring granted=%d): watchdog will retry",
                   UInt32(bitPattern: opened), Self.accessGranted ? 1 : 0)
             return
         }
@@ -115,8 +115,8 @@ final class BrightnessKeyListener {
         guard isPressed else { return }  // press only, not release
 
         switch (page, usage) {
-        case (0x07, 0x3A): if isBrightnessIntent { onKey(false) }  // F1 — down
-        case (0x07, 0x3B): if isBrightnessIntent { onKey(true) }   // F2 — up
+        case (0x07, 0x3A): if isBrightnessIntent { onKey(false) }  // F1, down
+        case (0x07, 0x3B): if isBrightnessIntent { onKey(true) }   // F2, up
         case (0x0C, 0x70): onKey(false)  // Display Brightness Decrement
         case (0x0C, 0x6F): onKey(true)   // Display Brightness Increment
         default: break

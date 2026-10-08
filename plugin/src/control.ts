@@ -27,6 +27,14 @@ const gainOr = (v: unknown, fallback: number): number =>
   typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.trunc(v))) : fallback;
 const boolOr = (v: unknown, fallback: boolean): boolean => (typeof v === 'boolean' ? v : fallback);
 
+/** The level the CLI printed after `up`, `down` or `mute` ("gain=N muted=true|false"), or
+ * null when the output does not match, so the caller falls back to status.json. */
+export function parseLevel(stdout: string): { gain: number; muted: boolean } | null {
+  const m = /^gain=(\d+) muted=(true|false)$/m.exec(stdout);
+  if (!m) return null;
+  return { gain: gainOr(Number(m[1]), 100), muted: m[2] === 'true' };
+}
+
 /** The helper's live status, or null if it hasn't written one yet (not running / first launch). */
 export function readStatus(): Status | null {
   let s: unknown;

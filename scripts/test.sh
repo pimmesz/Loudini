@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Loudini's test gate — contract regression tests for helper/ControlFile.swift.
+# Loudini's test gate: contract regression tests for helper/ControlFile.swift.
 #
 # ControlFile.swift is the one file linked into BOTH the daemon and the menu-bar app, and it
 # encodes the invariants BUILD.md calls non-negotiable: atomic writes, lenient parsing,
 # clamping, and telling the truth about a dead daemon. It is pure Foundation file+JSON with no
-# Core Audio, so it can be tested with nothing but swiftc — no audio hardware, no TCC grants,
+# Core Audio, so it can be tested with nothing but swiftc: no audio hardware, no TCC grants,
 # no XCTest, no SPM, no new dependencies. Runs in about a second; safe to run any time.
 #
-# SAFETY — read before changing anything here. The tests WRITE control.json and status.json.
+# SAFETY: read before changing anything here. The tests WRITE control.json and status.json.
 # ControlFile.swift resolves those from FileManager.homeDirectoryForCurrentUser, which asks OS
 # directory services and therefore IGNORES $HOME: overriding HOME would look like it sandboxed
 # the run while actually overwriting the developer's real ~/.config/loudini. CFFIXED_USER_HOME
 # is the override CoreFoundation honours. It is exported before the binary starts because
-# `configDir` is a lazily initialised global — a setenv() from inside the process could come
+# `configDir` is a lazily initialised global: a setenv() from inside the process could come
 # too late and freeze the real path. The test binary re-checks this itself and exits 2 rather
 # than run unsandboxed; we prove that guard still works below before trusting it.
 set -euo pipefail
@@ -27,12 +27,12 @@ binary="${work}/control-file-tests"
 
 echo "compiling contract tests…"
 swiftc -parse-as-library -o "${binary}" \
-  helper/ControlFile.swift helper/AppTarget.swift helper/StallMath.swift helper/DeviceLevels.swift \
+  helper/ControlFile.swift helper/AppTarget.swift helper/StallMath.swift helper/DeviceLevels.swift helper/Takeover.swift \
   helper/ControlFileTests.swift \
   -framework Foundation
 
 # Prove the safety net before relying on it: with no sandbox the binary must refuse (exit 2).
-# Checking the exact code matters — a plain "did it fail?" would also be satisfied by a normal
+# Checking the exact code matters: a plain "did it fail?" would also be satisfied by a normal
 # test failure (exit 1) and would quietly stop verifying anything. --guard-only stops right
 # after the guard, so a broken guard exits 0 without having run a single test against the
 # real ~/.config/loudini.
