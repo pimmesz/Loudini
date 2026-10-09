@@ -42,6 +42,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var monoIconItem: NSMenuItem!
     private var updateCheckItem: NSMenuItem!
     private var updateItem: NSMenuItem!
+    /// Shown while this copy runs from a disk image or a translocated folder, where it
+    /// can neither update itself nor start at login.
+    private var outsideApplicationsItem: NSMenuItem!
+    private let isOutsideApplications: Bool = {
+        let url = Bundle.main.bundleURL
+        if url.path.contains("/AppTranslocation/") { return true }
+        // A mounted disk image is read-only; a copy on a writable external drive updates fine.
+        return (try? url.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly == true
+    }()
     private var brightnessItem: NSMenuItem!
 
     // Per-app volume section (Phase 3). One row per status.json.apps entry, built
@@ -206,6 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First, before anything starts from this copy: a disk-image copy that spawned the
+        // daemon would hold daemon.lock, and the intro below is shown only once.
+        if offerMoveToApplications() { return }
         updater = Updater()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.menu = buildMenu()
@@ -253,6 +265,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// One plain explanation before the first permission dialogs, so they don't arrive out
     /// of nowhere from an app with no window. Shown once, and only on a fresh install.
+    /// Offer to move a copy running from a disk image into /Applications, the only place it
+    /// can update itself. True when the move started and this copy is quitting.
+    private func offerMoveToApplications() -> Bool {
+        guard isOutsideApplications else { return false }
+        let alert = NSAlert()
+        alert.messageText = "Move Loudini to Applications?"
+        alert.informativeText = "Loudini can only update itself and start at login from your Applications folder."
+        alert.addButton(withTitle: "Move to Applications")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+
+        let target = URL(fileURLWithPath: "/Applications/Loudini.app")
+        let fm = FileManager.default
+        if fm.fileExists(atPath: target.path) {
+            let confirm = NSAlert()
+            confirm.messageText = "Replace the Loudini in Applications?"
+            confirm.informativeText = "The copy there goes to the Trash. If it is running, it quits first."
+            confirm.addButton(withTitle: "Replace")
+            confirm.addButton(withTitle: "Cancel")
+            guard confirm.runModal() == .alertFirstButtonReturn else { return false }
+        }
+        // Any other running copy keeps daemon.lock, and the moved copy's engine would only
+        // wait behind it, so every other copy must be gone before the move.
+        let me = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != me }
+        others.forEach { $0.terminate() }
+        let deadline = Date().addingTimeInterval(5)
+        while others.contains(where: { !$0.isTerminated }) && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        if others.contains(where: { !$0.isTerminated }) {
+            return moveFailed("Another Loudini is still running. Quit it from its menu, then open this copy again.")
+        }
+        // Copy next to the target first, so a failed copy never costs the working install.
+        let staging = URL(fileURLWithPath: "/Applications/.Loudini-moving-\(me).app")
+        var isStaged = false
+        do {
+            try fm.copyItem(at: Bundle.main.bundleURL, to: staging)
+            isStaged = true
+            if fm.fileExists(atPath: target.path) { try fm.trashItem(at: target, resultingItemURL: nil) }
+            try fm.moveItem(at: staging, to: target)
+        } catch {
+            // A half-copied staging bundle is useless; a complete one is kept only when the
+            // old copy is already in the Trash, because then it is the only copy left.
+            if !isStaged || fm.fileExists(atPath: target.path) { try? fm.removeItem(at: staging) }
+            return moveFailed("\(error.localizedDescription) Drag Loudini into Applications yourself, then open it from there.")
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: target, configuration: config) { _, error in
+            DispatchQueue.main.async {
+                // This copy set nothing up, so it quits either way; on a failed launch it says why first.
+                if let error {
+                    _ = self.moveFailed("Loudini is now in Applications but did not open "
+                        + "(\(error.localizedDescription)). Open it from Applications.")
+                }
+                NSApp.terminate(nil)
+            }
+        }
+        return true
+    }
+
+    private func moveFailed(_ reason: String) -> Bool {
+        let failed = NSAlert()
+        failed.messageText = "Loudini could not be moved"
+        failed.informativeText = reason
+        failed.runModal()
+        return false
+    }
+
     private func showPermissionIntroOnce() {
         guard !UserDefaults.standard.bool(forKey: "shownPermissionIntro"), !AXIsProcessTrusted() else { return }
         UserDefaults.standard.set(true, forKey: "shownPermissionIntro")
@@ -270,7 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isQuitting = true
         keyTap?.stop()
         brightnessKeys?.stop()
-        statusWatcher.stop()
+        statusWatcher?.stop()  // nil when a disk-image copy quits right after moving itself
         axRetryTimer?.invalidate()
         daemonRetryTimer?.invalidate()
         writeQueue.sync {}  // drain pending control.json writes before we go
@@ -454,6 +538,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                action: #selector(toggleLoginItem), keyEquivalent: "")
         loginItem.target = self
         loginItem.image = NSImage(systemSymbolName: "arrow.right.circle", accessibilityDescription: nil)
+        // A login item would point at a disk image that is gone after the next eject.
+        loginItem.isEnabled = !isOutsideApplications
         menu.addItem(loginItem)
 
         monoIconItem = NSMenuItem(title: "Monochrome Icon",
@@ -478,6 +564,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateItem.isHidden = true
         updateItem.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
         menu.addItem(updateItem)
+
+        outsideApplicationsItem = NSMenuItem(title: "Updates are off: Loudini is not in Applications",
+                                             action: nil, keyEquivalent: "")
+        outsideApplicationsItem.isEnabled = false
+        outsideApplicationsItem.isHidden = !isOutsideApplications
+        outsideApplicationsItem.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        menu.addItem(outsideApplicationsItem)
 
         menu.addItem(.separator())
 
@@ -1000,6 +1093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleLoginItem() {
+        guard !isOutsideApplications else { return }
         let service = SMAppService.mainApp
         do {
             if service.status == .enabled {
