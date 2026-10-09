@@ -3,7 +3,7 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.0] — 2026-10-09
 
 ### Added
 - **Explicit mute commands.** Use `loudini mute on` or `loudini mute off` in shortcuts
