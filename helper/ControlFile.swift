@@ -25,13 +25,21 @@ let statusURL = configDir.appendingPathComponent("status.json")
 
 func clampGain(_ n: Int) -> Int { min(100, max(0, n)) }
 
+/// What a 0-100 level means as an amplitude: 0.5 dB per point, so every 6-point key press is
+/// an even 3 dB step and 100 stays unity. A straight gain/100 made presses near the top
+/// barely audible and presses near the bottom jump 6 dB. 0 is silent.
+func loudnessMultiplier(_ gain: Int) -> Float {
+    let g = clampGain(gain)
+    return g == 0 ? 0 : powf(10, Float(g - 100) * 0.5 / 20)
+}
+
 /// One per-app override from control.json's `apps` map (Phase 2). Effective
 /// per-app level = master × app; a muted app contributes zero before the master
 /// multiply. `gain`/`muted` here are strictly a PRE-master attenuation.
 struct AppOverride: Equatable {
     var gain: Int    // 0-100
     var muted: Bool
-    var multiplier: Float { muted ? 0 : Float(gain) / 100 }
+    var multiplier: Float { muted ? 0 : loudnessMultiplier(gain) }
 }
 
 struct Control: Equatable {
@@ -40,7 +48,7 @@ struct Control: Equatable {
     /// Per-app overrides keyed by bundle id. Absent app ⇒ rides master only.
     /// Backward compatible: an old control.json without `apps` yields [:].
     var apps: [String: AppOverride] = [:]
-    var multiplier: Float { muted ? 0 : Float(gain) / 100 }
+    var multiplier: Float { muted ? 0 : loudnessMultiplier(gain) }
 }
 
 /// One row of the live "producing audio" roster the daemon publishes in
@@ -260,6 +268,16 @@ enum ControlOps {
     }
 
     @discardableResult
+    static func setMuted(_ isMuted: Bool) throws -> Control {
+        try withControlLock {
+            var c = current()
+            c.muted = isMuted
+            try writeControl(c)
+            return c
+        }
+    }
+
+    @discardableResult
     static func set(gain: Int) throws -> Control {
         try withControlLock {
             var c = current()
@@ -300,6 +318,19 @@ enum ControlOps {
         }
     }
 
+    @discardableResult
+    static func setAppMuted(_ bundleID: String, muted isMuted: Bool) throws -> Control {
+        try withControlLock {
+            var c = current()
+            guard !bundleID.isEmpty else { return c }
+            var o = c.apps[bundleID] ?? AppOverride(gain: 100, muted: false)
+            o.muted = isMuted
+            c.apps[bundleID] = o
+            try writeControl(c)
+            return c
+        }
+    }
+
     /// "Reset all apps to 100%": clears the whole `apps` map so every app rides
     /// master only again. Master gain/mute are untouched.
     @discardableResult
@@ -307,6 +338,17 @@ enum ControlOps {
         try withControlLock {
             var c = current()
             c.apps = [:]
+            try writeControl(c)
+            return c
+        }
+    }
+
+    @discardableResult
+    static func resetApp(_ bundleID: String) throws -> Control {
+        try withControlLock {
+            var c = current()
+            guard !bundleID.isEmpty else { return c }
+            c.apps.removeValue(forKey: bundleID)
             try writeControl(c)
             return c
         }

@@ -113,9 +113,27 @@ private func testClampGain() {
 private func testMultiplier() {
     // A mute must be a hard zero, not a small gain: anything else leaks audio.
     checkEqual("muted master is silent", Control(gain: 100, muted: true).multiplier, 0)
-    checkEqual("unmuted master scales", Control(gain: 50, muted: false).multiplier, 0.5)
     checkEqual("muted app is silent", AppOverride(gain: 100, muted: true).multiplier, 0)
-    checkEqual("unmuted app scales", AppOverride(gain: 25, muted: false).multiplier, 0.25)
+    checkEqual("full level is unity", Control(gain: 100, muted: false).multiplier, 1)
+    checkEqual("level 0 is silent", Control(gain: 0, muted: false).multiplier, 0)
+    // 0.5 dB per point: level 50 is -25 dB, for the master and a per-app override alike.
+    let minus25dB = powf(10, -25 / 20)
+    check("unmuted master follows the curve", abs(Control(gain: 50, muted: false).multiplier - minus25dB) < 1e-6)
+    check("unmuted app follows the curve", abs(AppOverride(gain: 50, muted: false).multiplier - minus25dB) < 1e-6)
+
+    // Every 6-point key press is the same 3 dB step anywhere on the scale, and the curve
+    // only ever rises. Compared with a tolerance: these are floats.
+    var rises = true, evenSteps = true
+    for g in 1...100 {
+        if loudnessMultiplier(g) <= loudnessMultiplier(g - 1) { rises = false }
+        if g >= 7 {
+            let stepDB = 20 * log10(loudnessMultiplier(g) / loudnessMultiplier(g - 6))
+            if abs(stepDB - 3) > 1e-3 { evenSteps = false }
+        }
+    }
+    check("louder level is always louder", rises)
+    check("every 6-point press is 3 dB", evenSteps)
+    checkEqual("out-of-range level clamps", loudnessMultiplier(250), 1)
 }
 
 // MARK: - writeControl
@@ -307,6 +325,73 @@ private func testPerAppMutators() {
     checkEqual("toggleMute keeps apps", try! ControlOps.toggleMute().apps["a"], AppOverride(gain: 20, muted: false))
     try! writeControl(Control(gain: 50, muted: false))
     checkEqual("set(gain:) clamps", try! ControlOps.set(gain: 250).gain, 100)
+}
+
+private func testExplicitMute() {
+    removeFixtures()
+    let initial = Control(gain: 42, muted: false,
+                          apps: ["com.target": AppOverride(gain: 27, muted: false),
+                                 "com.other": AppOverride(gain: 61, muted: true)])
+    try! writeControl(initial)
+    // Applied status can lag behind a command. Writers must use the locked control file.
+    writeRaw(#"{"gain":90,"muted":true,"running":false}"#, to: statusURL)
+    for isMuted in [true, true, false, false] {
+        let result = try! ControlOps.setMuted(isMuted)
+        var expected = initial
+        expected.muted = isMuted
+        checkEqual("explicit master mute preserves gain and apps", result, expected)
+        checkEqual("repeated master mute persists the requested state", ControlOps.current(), expected)
+    }
+    check("bare master mute still toggles on", try! ControlOps.toggleMute().muted)
+    check("bare master mute still toggles off", try! ControlOps.toggleMute().muted == false)
+
+    try! ControlOps.setMuted(true)
+    for isMuted in [true, true, false, false] {
+        let result = try! ControlOps.setAppMuted("com.target", muted: isMuted)
+        var expected = initial
+        expected.muted = true
+        expected.apps["com.target"]?.muted = isMuted
+        checkEqual("explicit app mute preserves its gain, sibling and master", result, expected)
+        checkEqual("repeated app mute persists the requested state", ControlOps.current(), expected)
+    }
+
+    let beforeEmpty = ControlOps.current()
+    try! ControlOps.setAppMuted("", muted: true)
+    checkEqual("explicit app mute ignores an empty target", ControlOps.current(), beforeEmpty)
+    let silentID = resolveAppTarget("com.silent", [])!
+    try! ControlOps.setAppMuted(silentID, muted: true)
+    checkEqual("a silent app can be muted before it plays", ControlOps.current().apps[silentID],
+               AppOverride(gain: 100, muted: true))
+    try! ControlOps.setAppMuted(silentID, muted: false)
+    checkEqual("unmuting a default-level app removes only its override", ControlOps.current(), beforeEmpty)
+    try! ControlOps.setAppMuted("com.absent", muted: false)
+    checkEqual("unmuting an absent app creates no override", ControlOps.current(), beforeEmpty)
+}
+
+private func testParseMuteAction() {
+    checkEqual("bare mute keeps toggle semantics", parseMuteAction([]), .toggle)
+    checkEqual("mute on means muted", parseMuteAction(["on"]), .set(true))
+    checkEqual("mute off means unmuted", parseMuteAction(["off"]), .set(false))
+    for args in [[""], ["true"], ["ON"], ["on", "off"], ["off", "extra"]] {
+        checkEqual("invalid mute arguments are rejected: \(args)", parseMuteAction(args), nil)
+    }
+}
+
+private func testResetOneApp() {
+    removeFixtures()
+    let initial = Control(gain: 43, muted: true,
+                          apps: ["com.target": AppOverride(gain: 27, muted: true),
+                                 "com.other": AppOverride(gain: 61, muted: false)])
+    try! writeControl(initial)
+    var expected = initial
+    expected.apps.removeValue(forKey: "com.target")
+    checkEqual("resetApp removes both the target gain and mute", try! ControlOps.resetApp("com.target"), expected)
+    checkEqual("resetApp persists without changing sibling or master", ControlOps.current(), expected)
+    checkEqual("resetApp of an absent target preserves every setting", try! ControlOps.resetApp("com.absent"), expected)
+    checkEqual("resetApp of an empty target preserves every setting", try! ControlOps.resetApp(""), expected)
+    try! ControlOps.resetApp("com.other")
+    checkEqual("resetting the last app writes an empty map for the daemon",
+               readControl(previous: initial), Control(gain: 43, muted: true))
 }
 
 // MARK: - readStatus
@@ -616,6 +701,9 @@ struct ControlFileTests {
         testReadControlLeniency()
         testNudge()
         testPerAppMutators()
+        testExplicitMute()
+        testParseMuteAction()
+        testResetOneApp()
         testReadStatusDeadDaemon()
         testReadStatusLiveDaemon()
         testReadStatusRoster()

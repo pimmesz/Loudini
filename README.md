@@ -91,6 +91,15 @@ terminal exits immediately, and one started by launchd, the app or the Stream De
 takes over when the first one stops. The menu-bar app prefers your LaunchAgent when one is installed (and revives it if it
 died); otherwise it runs its own bundled daemon.
 
+### Per-app volume
+
+Apps appear in the menu while they play audio. Click an app's percentage to enter an exact
+whole-number level from 0 to 100. Press Return to apply it or Escape to cancel; entering a
+level keeps that app's mute setting. The number in the menu shows the applied level.
+
+The reset arrow beside an app restores it to 100% and unmutes it. Other app levels and the
+master volume stay as they were. **Reset App Volumes** still resets every app at once.
+
 ### External-monitor brightness (menu-bar app, Apple Silicon)
 
 With an external DDC-capable monitor attached, the menu-bar app also controls its brightness over
@@ -148,17 +157,22 @@ shell profile. `install-cli.sh` prints the same note when it needs to.
 ```
 loudini up [step]     volume += step (default 6), un-mutes, prints: gain=48 muted=false
 loudini down [step]   volume -= step (default 6), un-mutes, prints the new level
-loudini mute          toggle mute, prints the new level
+loudini mute [on|off] set mute explicitly, or toggle with no argument; prints the new level
 loudini set <0-100>   set the volume
 loudini get           print: gain=42 muted=false running=true pipeline=true device="Scarlett 2i2 USB"
 loudini apps          list apps currently producing audio (from status.json)
 loudini apps reset    reset every per-app volume to 100% (clears overrides)
-loudini app <id|name> set <0-100> | mute | get
+loudini app <id|name> set <0-100> | mute [on|off] | get
                       set/toggle/read one app's volume (bundle id exact, name fuzzy)
 loudini doctor        diagnose the daemon, audio-capture permission, launchd and conflicts, with fixes
 loudini brightness up|down [step] | set <0-100> | get
                       external-monitor brightness over DDC (needs NO permission, bind it to any key)
 ```
+
+For repeatable shortcuts, use `loudini mute on` to mute and `loudini mute off` to unmute.
+Running either twice keeps the requested state and preserves the saved volume. The same applies to
+one app: `loudini app com.spotify.client mute on` or `loudini app com.spotify.client mute off`.
+With no `on` or `off`, `mute` still toggles, so existing key bindings keep working.
 
 The writing subcommands (`up`/`down`/`mute`/`set`, `apps reset`, and `app <id> set|mute`) only write
 `control.json` and exit immediately; the running daemon applies the change within 100 ms. The reading
@@ -193,7 +207,8 @@ the first:
 
 - `control.json`: `{"gain": 0-100, "muted": bool, "apps"?: {"<bundleID>": {"gain": 0-100, "muted": bool}}}`.
   Write it (atomically: temp file in the same directory, then rename) and the daemon applies it within
-  100 ms. Malformed content is ignored and the daemon keeps its last good values. An absent `apps`
+  100 ms. On a fixed-level output, and for per-app levels, one point is 0.5 dB: 100 is full level,
+  94 is 3 dB down, 50 is 25 dB down, 0 is silent. Malformed content is ignored and the daemon keeps its last good values. An absent `apps`
   key also keeps the previous overrides; `"apps": {}` clears them (Loudini always writes the key).
   **If you only own `gain`/`muted`, read-modify-write. Never replace the document.** Writing just
   `{"gain":…,"muted":…}` erases the whole `apps` map and every per-app volume with it.

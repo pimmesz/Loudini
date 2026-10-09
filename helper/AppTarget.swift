@@ -9,6 +9,20 @@ func parsePercent(_ s: String) -> Int? {
     return n
 }
 
+enum MuteAction: Equatable {
+    case toggle
+    case set(Bool)
+}
+
+func parseMuteAction(_ args: [String]) -> MuteAction? {
+    switch args {
+    case []: return .toggle
+    case ["on"]: return .set(true)
+    case ["off"]: return .set(false)
+    default: return nil
+    }
+}
+
 /// Resolve a user-typed `app` target to a bundle id. Bundle id is exact
 /// (and usable even when the app isn't in the roster: you can pre-set a
 /// silent app); a name is matched case-insensitively over the live roster

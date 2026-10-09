@@ -25,7 +25,11 @@ enum LoudiniMain {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let step = 6  // % per key press: matches the CLI and Stream Deck
     private static let fineStep = 1  // % per key press when Shift is held (small adjust)
-    private static let volumeSliderTip = "Tip: hold Shift while you press a volume key to change the volume by 1%."
+    private static let softwareVolumeTip = "100% leaves the level unchanged; 50% is 25 dB quieter; 0% is silent. "
+        + "Above 0%, each point changes the level by 0.5 dB."
+    private static let volumeSliderTip = "For outputs without their own volume control: " + softwareVolumeTip
+        + "\nOutputs with their own volume control use the device's scale."
+        + "\nTip: hold Shift while you press a volume key to change the volume by one point."
 
     private var statusItem: NSStatusItem!
     private var slider: NSSlider!
@@ -72,6 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let name: NSTextField
         let slider: NSSlider
         let mute: NSButton
+        let level: NSButton
+        let reset: NSButton
     }
 
     /// When on, the menu-bar logo renders as a template (single colour that
@@ -809,7 +815,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let name = NSTextField(labelWithString: a.name)
         name.font = .systemFont(ofSize: 12)
         name.lineBreakMode = .byTruncatingTail
-        name.frame = NSRect(x: 40, y: 29, width: 192, height: 15)
+        name.frame = NSRect(x: 40, y: 29, width: 156, height: 15)
+
+        let reset = NSButton(frame: NSRect(x: 204, y: 24, width: 28, height: 24))
+        reset.isBordered = false
+        reset.bezelStyle = .regularSquare
+        reset.imagePosition = .imageOnly
+        reset.image = NSImage(systemSymbolName: "arrow.uturn.backward", accessibilityDescription: nil)
+        reset.target = self
+        reset.action = #selector(appResetClicked(_:))
+        reset.toolTip = "Set this app to 100% and unmute it. Other apps keep their settings."
 
         // At least 24 pt, with a gap above the slider, so a shaky click mutes instead of sliding.
         let mute = NSButton(frame: NSRect(x: 238, y: 24, width: 28, height: 24))
@@ -822,33 +837,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let slider = NSSlider(value: Double(a.gain), minValue: 0, maxValue: 100,
                               target: self, action: #selector(appSliderMoved(_:)))
         slider.isContinuous = true
-        slider.frame = NSRect(x: 40, y: 2, width: 226, height: 20)
+        slider.frame = NSRect(x: 40, y: 2, width: 160, height: 20)
+        slider.toolTip = Self.softwareVolumeTip
+
+        let level = NSButton(frame: NSRect(x: 204, y: 0, width: 64, height: 24))
+        level.isBordered = false
+        level.bezelStyle = .regularSquare
+        level.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        level.target = self
+        level.action = #selector(appLevelClicked(_:))
+        level.toolTip = "Enter an exact volume from 0 to 100.\n" + Self.softwareVolumeTip
 
         // Bundle id rides on the controls so the action knows which app to write.
         // Bundle-less sources can't be targeted (no stable key): disable them.
         let addressable = !a.bundleID.isEmpty
         slider.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
         mute.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
+        level.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
+        reset.identifier = NSUserInterfaceItemIdentifier(a.bundleID)
         slider.isEnabled = addressable
         mute.isEnabled = addressable
+        level.isEnabled = addressable
+        reset.isEnabled = addressable
         if !addressable {
             let tip = "Loudini cannot change the volume of this app on its own."
             slider.toolTip = tip
             mute.toolTip = tip
+            level.toolTip = tip
+            reset.toolTip = tip
         }
 
         row.addSubview(icon)
         row.addSubview(name)
         row.addSubview(mute)
         row.addSubview(slider)
+        row.addSubview(level)
+        row.addSubview(reset)
         item.view = row
-        return AppRowViews(item: item, icon: icon, name: name, slider: slider, mute: mute)
+        return AppRowViews(item: item, icon: icon, name: name, slider: slider, mute: mute,
+                           level: level, reset: reset)
     }
 
     private func updateAppRow(_ row: AppRowViews?, _ a: AppEntry) {
         guard let row else { return }
         row.name.stringValue = a.name
         row.slider.setAccessibilityLabel("\(a.name) volume")
+        row.level.title = "\(a.gain)%"
+        row.level.setAccessibilityLabel("Set \(a.name) volume, currently \(a.gain)%")
+        row.reset.setAccessibilityLabel("Reset \(a.name) volume and unmute")
         // Dim a lingering (idle) app so the live ones read first.
         row.name.textColor = a.active ? .labelColor : .secondaryLabelColor
         // pid_t(exactly:), never trap on an out-of-range pid; nil falls back.
@@ -875,6 +911,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func resetAppsClicked() {
         writeControlChange { try ControlOps.resetApps() }
+    }
+
+    @objc private func appResetClicked(_ sender: NSButton) {
+        guard let bid = sender.identifier?.rawValue, !bid.isEmpty else { return }
+        writeControlChange { try ControlOps.resetApp(bid) }
+    }
+
+    @objc private func appLevelClicked(_ sender: NSButton) {
+        guard let bid = sender.identifier?.rawValue, !bid.isEmpty,
+              let app = lastApps.first(where: { $0.bundleID == bid }) else { return }
+        // Finish menu tracking before opening a dialog with its own keyboard focus.
+        statusItem.menu?.cancelTracking()
+        DispatchQueue.main.async { self.editAppLevel(app) }
+    }
+
+    private func editAppLevel(_ app: AppEntry) {
+        let alert = NSAlert()
+        alert.messageText = "Set \(app.name) volume"
+        alert.informativeText = "Enter a whole number from 0 to 100. The app's mute setting stays the same."
+        if !lastStatusRunning || !lastPipelineOK {
+            alert.informativeText += " Loudini cannot change the volume right now. Your choice is saved for when it works again."
+        }
+        alert.addButton(withTitle: "Set Volume")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        input.stringValue = String(app.gain)
+        input.setAccessibilityLabel("\(app.name) volume, 0 to 100")
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        NSApp.activate(ignoringOtherApps: true)
+
+        while alert.runModal() == .alertFirstButtonReturn {
+            guard let gain = Int(input.stringValue), (0...100).contains(gain) else {
+                alert.informativeText = "Enter a whole number from 0 to 100, for example 40."
+                continue
+            }
+            writeControlChange { try ControlOps.setApp(app.bundleID, gain: gain) }
+            return
+        }
     }
 
     private func handleVolumeKey(_ key: VolumeKeyTap.Key, fine: Bool) {

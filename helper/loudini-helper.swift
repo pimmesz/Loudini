@@ -12,7 +12,7 @@
 // Control:  ~/.config/loudini/control.json
 //           {"gain": <int 0-100>, "muted": <bool>,
 //            "apps": {"<bundleID>": {"gain": 0-100, "muted": bool}, ...}}  (apps optional)
-//           polled every 100ms; master multiplier = muted ? 0 : gain/100,
+//           polled every 100ms; master multiplier = muted ? 0 : loudnessMultiplier(gain) (0.5 dB per point),
 //           per-app multiplier applied pre-master (effective = master × app).
 // Status:   ~/.config/loudini/status.json
 //           {"gain","muted","running","pipeline","device","pid","reason"?,"apps"}
@@ -1372,7 +1372,7 @@ final class Engine {
                 log("recovered after \(f.attempts) failed attempts since \(logTimestamp.string(from: f.since))")
                 retryFailure = nil
             }
-            log("pipeline live (\(reason)): global tap -> master \(control.multiplier) -> \(dev.name); \(appNote)\(droppedNote)")
+            log("pipeline live (\(reason)): global tap -> master \(control.multiplier) (gain=\(control.gain)) -> \(dev.name); \(appNote)\(droppedNote)")
             scheduleShapeLog(for: p)
             // If we adopted the device's own volume, sync control.json so every
             // frontend shows that level (our watcher re-applying it is a no-op).
@@ -1510,12 +1510,12 @@ let usageText = """
 usage: loudini-helper [--device <UID>]   run the gain daemon (default: current output device)
        loudini-helper up [step]          gain += step (default 6), un-mute
        loudini-helper down [step]        gain -= step (default 6), un-mute
-       loudini-helper mute               toggle mute
+       loudini-helper mute [on|off]      set mute explicitly, or toggle with no argument
        loudini-helper set <0-100>        set gain
        loudini-helper get                print current level (status.json if present)
        loudini-helper apps               list apps currently producing audio (from status.json)
        loudini-helper apps reset         reset every per-app volume to 100% (clears overrides)
-       loudini-helper app <id|name> set <0-100> | mute | get
+       loudini-helper app <id|name> set <0-100> | mute [on|off] | get
                                          set/toggle/read one app's volume (bundle id exact, name fuzzy)
        loudini-helper doctor             diagnose the daemon, audio-capture permission, launchd and conflicts
        loudini-helper --version          print the build version
@@ -1582,8 +1582,12 @@ enum LoudiniHelper {
                 print("gain=\(c.gain) muted=\(c.muted)")
                 warnIfNoDaemon()
             case "mute":
-                guard args.count == 1 else { usage() }
-                let c = try ControlOps.toggleMute()
+                guard let action = parseMuteAction(Array(args.dropFirst())) else { usage() }
+                let c: Control
+                switch action {
+                case .toggle: c = try ControlOps.toggleMute()
+                case .set(let isMuted): c = try ControlOps.setMuted(isMuted)
+                }
                 print("gain=\(c.gain) muted=\(c.muted)")
                 warnIfNoDaemon()
             case "set":
@@ -1620,7 +1624,7 @@ enum LoudiniHelper {
                     }
                 }
             case "app":
-                // app <bundleID|name> set <0-100> | mute | get. Bundle id is exact
+                // app <bundleID|name> set <0-100> | mute [on|off] | get. Bundle id is exact
                 // (settable even while the app is silent); name is a fuzzy,
                 // case-insensitive convenience over the live roster.
                 guard args.count >= 3 else { usage() }
@@ -1637,8 +1641,12 @@ enum LoudiniHelper {
                     print("\(sanitizeForOutput(bid)) gain=\(g)")
                     warnIfNoDaemon()
                 case "mute":
-                    guard args.count == 3 else { usage() }
-                    let c = try ControlOps.toggleAppMute(bid)
+                    guard let action = parseMuteAction(Array(args.dropFirst(3))) else { usage() }
+                    let c: Control
+                    switch action {
+                    case .toggle: c = try ControlOps.toggleAppMute(bid)
+                    case .set(let isMuted): c = try ControlOps.setAppMuted(bid, muted: isMuted)
+                    }
                     print("\(sanitizeForOutput(bid)) muted=\(c.apps[bid]?.muted ?? false)")
                     warnIfNoDaemon()
                 case "get":

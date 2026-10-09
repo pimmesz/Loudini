@@ -71,13 +71,16 @@ rewrite "${site}" "s|&middot; v[0-9]+\.[0-9]+\.[0-9]+|\&middot; v${version}|"
 
 # CHANGELOG skeleton above the newest existing section. Skipped when the section already
 # exists, so re-running a bump can't produce two headings for one version.
+# An [Unreleased] section already holds this release's notes, so it is renamed instead.
 if grep -qF "## [${version}]" "${changelog}"; then
   echo "note: ${changelog} already has a [${version}] section, left as-is."
 else
   awk -v ver="${version}" -v today="$(date +%F)" '
     !inserted && /^## \[/ {
-      print "## [" ver "] — " today "\n\n### Added\n- TODO: describe this release before running scripts/release.sh.\n"
       inserted = 1
+      heading = "## [" ver "] — " today
+      if ($0 == "## [Unreleased]") { print heading; next }
+      print heading "\n\n### Added\n- TODO: describe this release before running scripts/release.sh.\n"
     }
     { print }
   ' "${changelog}" > "${changelog}.tmp"

@@ -3,6 +3,23 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Explicit mute commands.** Use `loudini mute on` or `loudini mute off` in shortcuts
+  that should always reach the same state. Per-app mute accepts the same arguments.
+  Bare `mute` still toggles, and saved volume levels stay intact.
+- **Exact per-app volume.** Click an app's percentage to enter a level. Its reset arrow
+  restores only that app to 100% and unmutes it, leaving other apps and the master alone.
+- **Volume-scale tips.** Hover over a volume slider or an app's percentage to see how
+  the software scale works, including when the master uses the output device's own scale.
+
+### Changed
+- **Even volume steps.** Per-app levels, and the master on outputs without their own
+  volume control, now change by 0.5 dB per point, so every key press sounds like the same
+  step. 100% is unchanged, but saved levels below 100% play quieter than before: 50% was
+  6 dB down and is now 25 dB down. Raise those levels once after updating.
+
 ## [0.6.1] — 2026-10-08
 
 ### Changed

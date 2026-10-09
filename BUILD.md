@@ -84,7 +84,10 @@ atomic-write helper, and both the LaunchAgent and the Stream Deck plugin ship th
 
 - **`~/.config/loudini/control.json`** holds `{"gain": <int 0-100>, "muted": <bool>, "apps"?: {"<bundleID>":
   {"gain": <int 0-100>, "muted": <bool>}}}`. Any frontend WRITES this. The daemon reads it every 100 ms
-  (lenient parse: bad/partial JSON keeps the last good value).
+  (lenient parse: bad/partial JSON keeps the last good value). Where Loudini's software gain is the
+  volume (a fixed-level output, and every per-app level), one point is 0.5 dB: 100 is unity, 94 is
+  -3 dB, 50 is -25 dB, 0 is silent (`loudnessMultiplier` in `helper/ControlFile.swift`). On an output
+  with its own volume the master is the device's own 0-100 scale instead.
   **A writer that owns only `gain`/`muted` MUST read-modify-write, never replace the document.**
   Emitting just `{"gain":…,"muted":…}` erases the `apps` map and every per-app override with it.
 - **`~/.config/loudini/status.json`** holds `{"gain","muted","running","pipeline","device","pid","reason"?,"apps",
