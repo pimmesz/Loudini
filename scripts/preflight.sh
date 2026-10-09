@@ -7,6 +7,7 @@
 #      version's CHANGELOG section is actually written rather than the bump-version skeleton
 #   2. no hardcoded version literal is left in scripts/package-dmg.sh, which would print
 #      a stale publish command the moment the version moves
+#   3. the release-page preamble that release.sh puts above every set of notes exists
 #
 # Reports EVERY failure in one run rather than stopping at the first, so one fix-up pass
 # is enough. Safe to run any time; release.sh runs it before it builds anything.
@@ -76,6 +77,12 @@ if literals="$(grep -vE '^[[:space:]]*#' scripts/package-dmg.sh | grep -nE '[0-9
   fail "scripts/package-dmg.sh has a hardcoded version literal: derive it from Info.plist:"
   printf '%s\n' "${literals}" >&2
 fi
+
+# --- 3. the release-page preamble must exist -------------------------------------
+# Older copies send their users to the release page; without it they never learn the one
+# manual step that gets them onto the in-app updater.
+[[ -s scripts/release-notes-preamble.md ]] ||
+  fail "scripts/release-notes-preamble.md is missing or empty: release.sh puts it above every release's notes."
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "preflight FAILED (${failures} problem(s)): fix these before releasing; 'scripts/bump-version.sh <N.N.N>' fixes version drift." >&2

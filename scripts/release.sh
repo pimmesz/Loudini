@@ -105,6 +105,10 @@ awk -v ver="${version}" '
   flag { print }
 ' CHANGELOG.md > "${notes}" || true
 [ -s "${notes}" ] || echo "Signed & notarized build. See CHANGELOG.md." > "${notes}"
+# Every release page opens with the one-time update steps: copies older than the in-app
+# updater only have an 'Update available' row, and it opens this page.
+{ cat "${script_dir}/release-notes-preamble.md"; echo; cat "${notes}"; } > "${notes}.full"
+mv "${notes}.full" "${notes}"
 
 # Fresh create, or resume a stuck DRAFT from a prior failed run.
 log "publishing v${version} to GitHub…"
@@ -120,7 +124,7 @@ if gh release view "v${version}" >/dev/null 2>&1; then
     exit 1
   fi
   gh release upload "v${version}" "${dmg}" "${appcast}" --clobber
-  gh release edit "v${version}" --draft=false
+  gh release edit "v${version}" --notes-file "${notes}" --draft=false
 else
   gh release create "v${version}" "${dmg}" "${appcast}" \
     --target "${head_sha}" \
