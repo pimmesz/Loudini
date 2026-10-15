@@ -64,7 +64,7 @@ Ad-hoc-signed builds are unsigned as far as macOS is concerned: right-click → 
 3. Allow **System Audio Recording**. This lets Loudini change the volume. Loudini does not record or
    save any sound.
 4. Check the menu bar. You see the Loudini icon and your volume level. If you see ⚠︎, open the menu.
-   It shows what to fix.
+   It shows what to fix. If you cannot find the icon, open Loudini again to show its menu.
 5. Turn on **Start at Login** in the menu. Then the volume keys keep working after you restart your
    Mac.
 6. Only for an external monitor: to use the brightness keys, click **Enable Brightness Keys (Input

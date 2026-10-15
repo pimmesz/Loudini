@@ -3,6 +3,13 @@
 All notable changes to Loudini are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Opening Loudini again shows its menu.** Before, nothing happened when you opened
+  Loudini from Applications or Spotlight while it was already running. This also helps
+  when the menu bar icon is hidden behind the notch.
+
 ## [0.7.0] — 2026-10-09
 
 ### Added

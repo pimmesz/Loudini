@@ -356,6 +356,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.runModal()
     }
 
+    /// Opening Loudini again while it runs shows its menu; a windowless app would
+    /// otherwise give no sign that it is running.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Still nil while a disk-image copy moves itself to Applications.
+        guard let item = statusItem else { return false }
+        // Deferred so the menu's tracking loop does not run inside the reopen event.
+        DispatchQueue.main.async {
+            if item.button?.window?.occlusionState.contains(.visible) == true {
+                item.button?.performClick(nil)
+            } else {
+                // The icon is hidden behind the notch or a full menu bar.
+                item.menu?.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            }
+        }
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         isQuitting = true
         keyTap?.stop()
