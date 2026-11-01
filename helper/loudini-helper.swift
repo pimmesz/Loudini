@@ -206,6 +206,7 @@ final class Pipeline {
 
     // First-callback ABL shape, captured with plain word stores (the render
     // thread must not allocate, lock, or do IO) and logged later off-thread.
+    // `loggedShape` is also hasDeliveredAudio's signal: keep it past the tap-buffer guard.
     private var loggedShape = false
     private var shapeInBufs: Int32 = 0, shapeOutBufs: Int32 = 0
     private var shapeTapCh: Int32 = 0, shapeOutCh: Int32 = 0
@@ -502,6 +503,10 @@ final class Pipeline {
         return "in=\(shapeInBufs) buffers (tap=last: \(shapeTapCh)ch/\(shapeTapBytes)B) "
              + "out=\(shapeOutBufs) buffers ([0]=\(shapeOutCh)ch/\(shapeOutBytes)B)"
     }
+
+    /// True once an IO callback carried every tap buffer. A device-switch handover waits
+    /// on it. One flag set once by the render thread, same plain-store contract as `gain`.
+    func hasDeliveredAudio() -> Bool { loggedShape }
 
     /// Current render heartbeat. Monotonic for the life of this pipeline, so
     /// "unchanged since the last sample" means no IO callback ran in between.
@@ -804,6 +809,8 @@ final class Engine {
     /// logged once, again when the text changes, then as a periodic summary.
     private var retryFailure: (text: String, since: Date, attempts: Int, lastLogged: TimeInterval)?
     private static let retrySummaryInterval: TimeInterval = 300.0
+    /// Longest a device switch waits for the new pipeline's audio before retiring the old one.
+    private static let handoverCap: TimeInterval = 0.5
     /// Remembered master level per fixed-level output (DeviceLevels.swift), and the output
     /// the last build targeted. Nil until the first build, so a daemon start restores nothing.
     private var deviceLevels = readDeviceLevels()
@@ -1167,6 +1174,11 @@ final class Engine {
         var settable: DarwinBoolean = false
         return AudioObjectIsPropertySettable(dev, &a, &settable) == 0 && settable.boolValue
     }
+    /// Whether `dev` is still present. False once it is unplugged, and when the read fails.
+    private func isAlive(_ dev: AudioObjectID) -> Bool {
+        var a = aliveAddr; var v: UInt32 = 0; var s = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(dev, &a, 0, nil, &s, &v) == 0 && v != 0
+    }
     private func readScalar(_ dev: AudioObjectID) -> Float? {
         var a = volumeAddr; var v: Float32 = 0; var s = UInt32(MemoryLayout<Float32>.size)
         // Sanitize: a buggy/hostile HAL device could report NaN/Inf/out-of-range,
@@ -1241,7 +1253,10 @@ final class Engine {
     private func rebuildLocked(reason: String) {
         guard !isShutdown else { return }
         removeDeviceListeners()
-        pipeline?.destroy()
+        // Kept until the target is known, so a device switch can keep it rendering until its
+        // replacement does (handsOver). Every exit destroys it: the worst case is destroy-first.
+        var outgoing = pipeline
+        defer { outgoing?.destroy() }
         pipeline = nil
         // No pipeline ⇒ no per-app tap is applied. Clear the built index now so
         // appsForStatus() reports master-only for every app while we are down or
@@ -1263,10 +1278,15 @@ final class Engine {
             scheduleRebuild(reason: "retry", after: 2.0)   // fail-open: audio stays on the direct path
             return
         }
+        let live = outgoing == nil ? nil : currentDevice
+        if !handsOver(liveUID: live?.uid, liveIsAlive: live.map { isAlive($0.id) } ?? false, targetUID: dev.uid) {
+            outgoing?.destroy()
+            outgoing = nil
+        }
 
         guard let selfProc = processObject(forPID: getpid()) else {
             logRebuildFailure(reason: reason, "cannot resolve own HAL process object yet, retrying in 2s")
-            // The old pipeline is already destroyed: publish that truthfully,
+            // The old pipeline is gone by the time this returns: publish that truthfully,
             // or status.json keeps claiming pipeline:true through the retries.
             currentDevice = nil
             lastReason = "cannot resolve own HAL process object"
@@ -1332,10 +1352,33 @@ final class Engine {
                 // Pipeline.init's fail-open for the aggregate/IOProc build. If
                 // there were no per-app taps to drop, there is nothing to fall
                 // open to, so rethrow into the retry loop (audio stays direct).
-                guard !specs.isEmpty else { throw error }
+                // During a handover, rethrow: the destroy-first retry below still falls open.
+                guard !specs.isEmpty, outgoing == nil else { throw error }
                 log("per-app pipeline failed to start: \(error.localizedDescription), "
                     + "dropping all per-app taps to the master path and rebuilding global-only (fail-open)", .error)
                 p = try buildAndStart([])
+            }
+            // Handover: both pipelines render until the new taps deliver audio (or the cap),
+            // so a started tap mutes every app at every instant of the switch.
+            var handoverNote = ""
+            if let old = outgoing {
+                // A refused per-app tap does not throw (Pipeline.init falls it open). The
+                // overlap may be the cause, so retry destroy-first like any other failure.
+                if p.bundleIDsInOrder.count < specs.count {
+                    p.destroy()
+                    throw NSError(domain: "loudini", code: 0, userInfo: [NSLocalizedDescriptionKey:
+                        "\(specs.count - p.bundleIDsInOrder.count) per-app tap(s) fell open during the overlap"])
+                }
+                let since = uptimeNow()
+                var ready = false
+                while !ready, uptimeNow() - since < Self.handoverCap {
+                    ready = p.hasDeliveredAudio()
+                    if !ready { usleep(2_000) }
+                }
+                old.destroy()
+                outgoing = nil
+                let ms = Int(((uptimeNow() - since) * 1000).rounded())
+                handoverNote = ready ? ", handed over after \(ms) ms" : ", handover timed out after \(ms) ms"
             }
             pipeline = p
             currentDevice = dev
@@ -1372,13 +1415,21 @@ final class Engine {
                 log("recovered after \(f.attempts) failed attempts since \(logTimestamp.string(from: f.since))")
                 retryFailure = nil
             }
-            log("pipeline live (\(reason)): global tap -> master \(control.multiplier) (gain=\(control.gain)) -> \(dev.name); \(appNote)\(droppedNote)")
+            log("pipeline live (\(reason)\(handoverNote)): global tap -> master \(control.multiplier) (gain=\(control.gain)) -> \(dev.name); \(appNote)\(droppedNote)")
             scheduleShapeLog(for: p)
             // If we adopted the device's own volume, sync control.json so every
             // frontend shows that level (our watcher re-applying it is a no-op).
             if masterViaScalar { publishGain(control.gain) }
             publishStatus()
         } catch {
+            // The HAL may refuse the overlap itself: retry once destroy-first.
+            if let old = outgoing {
+                log("handover failed: \(error.localizedDescription); rebuilding without it", .error)
+                old.destroy()
+                outgoing = nil
+                rebuildLocked(reason: reason)
+                return
+            }
             logRebuildFailure(reason: reason, "failed: \(error.localizedDescription); audio untouched (fail-open), retrying in 2s")
             currentDevice = nil
             lastReason = error.localizedDescription

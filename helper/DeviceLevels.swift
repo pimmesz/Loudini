@@ -43,3 +43,12 @@ func planDeviceSwitch(previousUID: String?, previousIsFixed: Bool, newUID: Strin
     let remembered = newIsFixed ? next[newUID] : nil
     return DeviceSwitchPlan(levels: next, applyGain: remembered == currentGain ? nil : remembered)
 }
+
+/// Whether a rebuild keeps the running pipeline until its replacement renders instead of
+/// destroying it first: only on a switch to a different output that is still present.
+/// Destroy-first lets every app play unattenuated until the new taps deliver (DECISIONS.md
+/// 2026-11-01).
+func handsOver(liveUID: String?, liveIsAlive: Bool, targetUID: String) -> Bool {
+    guard let liveUID, liveIsAlive else { return false }
+    return liveUID != targetUID
+}
