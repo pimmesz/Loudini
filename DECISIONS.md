@@ -246,3 +246,54 @@ this; they update once by hand.
 release older macOS can install), the key or the Developer ID is lost, Sparkle stops being maintained,
 or Loudini ever becomes sandboxed (the XPC services would then be required).
 
+## 2026-11-01: A device switch hands the audio over instead of tearing it down first
+
+**Decision.** When a rebuild moves to a different output and the outgoing output is still present
+(`handsOver`, `helper/DeviceLevels.swift`), `rebuildLocked` keeps the running pipeline rendering
+while it builds and starts the next one. It destroys the outgoing pipeline once the new taps deliver
+audio (`Pipeline.hasDeliveredAudio`) or after 0.5 s, whichever comes first. Every other rebuild
+keeps destroy-first.
+
+**Why.** Every layer of attenuation (master, per-app, mute) exists only while a tap does: the taps
+mute their apps' direct path (`.mutedWhenTapped`) and Loudini re-renders it. Destroy-first let every
+app play straight to the new output, without Loudini's level or mute, until the new taps delivered.
+Each switch played a short burst: at the app's full level on a fixed-level DAC, and audible while
+muted.
+
+**Scope.** The rebuilds that keep destroy-first, and why:
+- *Same output* (sample rate, per-app set change, an overridden app launching or quitting, any
+  `--device` run). Two aggregates on one physical output is a conflict an overlap could hit, and
+  it would buy nothing.
+- *Outgoing output unplugged.* It renders nothing, so keeping its taps would only mute.
+- *No live pipeline* (startup, the 2 s retry, the rebuild after a render stall). Nothing to hand
+  over. The stall watchdog destroys the stalled pipeline itself, since its fix is the un-mute.
+
+**Failure handling.** The outgoing pipeline keeps its level and its output throughout, so the change
+adds no state in which a tap mutes audio that nothing renders: while the next pipeline builds,
+audio keeps playing through the outgoing output, as it already did for the 0.3 s rebuild debounce.
+If the next pipeline fails to build or start, or the HAL refuses one of its per-app taps (which
+`Pipeline.init` absorbs without throwing), the outgoing pipeline is destroyed and the rebuild runs
+once more destroy-first, with the usual per-app fall-open. A crash has `coreaudiod` tear both down.
+
+**Rejected.**
+- *Silence the outgoing pipeline before starting the next one.* No moment where both outputs play,
+  but it adds the state above: a live tap muting audio that nothing renders. A hung
+  `AudioDeviceStart` would then hold every app silent, and undoing that needs a watchdog on
+  another queue.
+- *Swap the sub-device of the running aggregate in place.* Same taps and IOProc, so no seam at all,
+  but a half-applied change leaves a live aggregate on a dead output with every app muted:
+  permanent silence. Not without a verify-and-fall-back path of its own.
+
+**Accepted residual.**
+- The outgoing output plays on for the overlap, past the point where it used to stop. If both
+  outputs reach the same speakers (a Multi-Output Device containing the other output), that audio
+  doubles for the overlap.
+- The engine queue blocks for the overlap, as it does for the HAL calls before it, so a volume or
+  mute change made during a switch lands that much later.
+- If the next pipeline has not delivered after 0.5 s, the outgoing one goes anyway (`handover timed
+  out` in the log). Any gap left until the new taps deliver is the old destroy-first window,
+  shortened by the wait.
+
+**Measured.** Overlap of 75 to 135 ms across a fixed-level USB DAC, the built-in speakers and
+AirPods (Bluetooth), muted and unmuted, and between the DAC and the speakers with a per-app tap.
+No timeouts.

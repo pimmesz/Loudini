@@ -609,6 +609,19 @@ private func testDeviceLevels() {
     try? FileManager.default.removeItem(at: deviceLevelsURL)
 }
 
+// MARK: - device-switch handover (DeviceLevels.swift)
+
+private func testHandover() {
+    check("a switch to another output hands over",
+          handsOver(liveUID: "speakers", liveIsAlive: true, targetUID: "scarlett"))
+    check("a rebuild on the same output tears down first",
+          !handsOver(liveUID: "scarlett", liveIsAlive: true, targetUID: "scarlett"))
+    check("an unplugged outgoing output tears down first",
+          !handsOver(liveUID: "scarlett", liveIsAlive: false, targetUID: "speakers"))
+    check("no live pipeline means nothing to hand over",
+          !handsOver(liveUID: nil, liveIsAlive: false, targetUID: "scarlett"))
+}
+
 // MARK: - waiting daemon gives up (Takeover.swift)
 
 private func testWaiterGiveUp() {
@@ -714,6 +727,7 @@ struct ControlFileTests {
         testResolveAppTarget()
         testStallVerdict()
         testDeviceLevels()
+        testHandover()
         testWaiterGiveUp()
         testAppEntryJSON()
 

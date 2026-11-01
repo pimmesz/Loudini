@@ -10,6 +10,11 @@ All notable changes to Loudini are documented here. This project adheres to
   Loudini from Applications or Spotlight while it was already running. This also helps
   when the menu bar icon is hidden behind the notch.
 
+### Fixed
+- **No more burst when you switch outputs.** Switching the output device let a fraction of a
+  second of audio through without Loudini's volume or mute, at full level on a DAC or interface
+  without its own volume. Loudini now keeps the old output playing until the new one takes over.
+
 ## [0.7.0] — 2026-10-09
 
 ### Added
